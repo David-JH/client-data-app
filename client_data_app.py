@@ -181,12 +181,12 @@ def insert_client_data(data: dict) -> bool:
 
         insert_query = """
         INSERT INTO CLIENTS (
-            CLIENT_TYPE, COMPANY, WHY_NOT_TRADING, BARRIERS,
+            CLIENT_STATUS, CLIENT_TYPE, COMPANY, WHY_NOT_TRADING, BARRIERS,
             DECISION_MAKERS, OVERALL_VOLUME, EUA_VOLUME, GO_VOLUME,
             POWER_VOLUME, GAS_VOLUME, OTHER_PRODUCT_NOTES, ACCESS_TYPE,
             FRONT_END, FRONT_END_DETAILS, CLEARERS, BROKERS, ETRM, SOURCE, NOTES
         ) VALUES (
-            %(client_type)s, %(company)s, %(why_not_trading)s, %(barriers)s,
+            %(client_status)s, %(client_type)s, %(company)s, %(why_not_trading)s, %(barriers)s,
             %(decision_makers)s, %(overall_volume)s, %(eua_volume)s, %(go_volume)s,
             %(power_volume)s, %(gas_volume)s, %(other_product_notes)s, %(access_type)s,
             %(front_end)s, %(front_end_details)s, %(clearers)s, %(brokers)s, %(etrm)s, %(source)s, %(notes)s
@@ -260,6 +260,15 @@ def main():
 
     # Create form
     with st.form("client_form", clear_on_submit=True):
+
+        # Client Status
+        client_status = st.selectbox(
+            "Client Status",
+            options=["Client", "Prospect", "Setting up"],
+            index=None,
+            placeholder="Select status...",
+            help="Current status of the client"
+        )
 
         # Client Type selection
         client_type = st.selectbox(
@@ -453,6 +462,7 @@ def main():
 
                 # Prepare data (no update_id or date - auto-generated in Snowflake)
                 data = {
+                    'client_status': client_status if client_status else None,
                     'client_type': client_type,
                     'company': company,
                     'why_not_trading': why_not_trading if why_not_trading else None,
