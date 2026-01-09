@@ -321,14 +321,14 @@ def main():
         )
 
         power_volume = st.number_input(
-            "Power Volume (MWh)",
+            "Power Volume (Lots)",
             min_value=0,
             value=None,
             help="Power trading volume"
         )
 
         gas_volume = st.number_input(
-            "Gas Volume (MW)",
+            "Gas Volume (Lots)",
             min_value=0,
             value=None,
             help="Gas trading volume"
@@ -482,24 +482,6 @@ def main():
                     st.rerun()
                 else:
                     st.error("Failed to submit data. Please check your connection and try again.")
-
-    # Show recent entries (optional)
-    st.markdown("---")
-    with st.expander("View Recent Entries"):
-        conn = get_snowflake_connection()
-        if conn:
-            try:
-                cursor = conn.cursor()
-                query = "SELECT * FROM CLIENTS ORDER BY ENTRY_DATE DESC LIMIT 10"
-                cursor.execute(query)
-                columns = [desc[0] for desc in cursor.description]
-                data = cursor.fetchall()
-                df = pd.DataFrame(data, columns=columns)
-                cursor.close()
-                st.dataframe(df, use_container_width=True)
-                conn.close()
-            except Exception as e:
-                st.info("No data available or unable to fetch recent entries.")
 
 
 if __name__ == "__main__":
