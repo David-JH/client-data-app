@@ -217,10 +217,30 @@ def main():
     if 'new_company_name' not in st.session_state:
         st.session_state.new_company_name = ""
 
-    # Check if we need to reset company fields (set by successful form submission)
+    # Initialize session state for clearers/brokers fields
+    if 'clearers' not in st.session_state:
+        st.session_state.clearers = []
+    if 'add_new_clearer' not in st.session_state:
+        st.session_state.add_new_clearer = False
+    if 'additional_clearers' not in st.session_state:
+        st.session_state.additional_clearers = ""
+    if 'brokers' not in st.session_state:
+        st.session_state.brokers = []
+    if 'add_new_broker' not in st.session_state:
+        st.session_state.add_new_broker = False
+    if 'additional_brokers' not in st.session_state:
+        st.session_state.additional_brokers = ""
+
+    # Check if we need to reset fields (set by successful form submission)
     if st.session_state.get('reset_company_fields', False):
         st.session_state.company_selection = "Select a company..."
         st.session_state.new_company_name = ""
+        st.session_state.clearers = []
+        st.session_state.add_new_clearer = False
+        st.session_state.additional_clearers = ""
+        st.session_state.brokers = []
+        st.session_state.add_new_broker = False
+        st.session_state.additional_brokers = ""
         st.session_state.reset_company_fields = False
 
     # Show success message and balloons after rerun
@@ -257,6 +277,46 @@ def main():
         )
     else:
         company = company_selection
+
+    # Clearers and Brokers outside form for dynamic checkbox behavior
+    st.markdown('<p class="sub-header">Service Providers</p>', unsafe_allow_html=True)
+    col1, col2 = st.columns(2)
+
+    with col1:
+        clearers = st.multiselect(
+            "Clearers",
+            options=clearer_list,
+            key="clearers",
+            help="Clearing firms used (select multiple)"
+        )
+        add_new_clearer = st.checkbox("Add new clearer not in list", key="add_new_clearer")
+        if add_new_clearer:
+            additional_clearers = st.text_input(
+                "New Clearer(s)",
+                placeholder="Enter new clearer names (comma-separated)",
+                key="additional_clearers",
+                help="Add clearers not in the list above"
+            )
+        else:
+            additional_clearers = ""
+
+    with col2:
+        brokers = st.multiselect(
+            "Brokers",
+            options=broker_list,
+            key="brokers",
+            help="Brokers used (select multiple)"
+        )
+        add_new_broker = st.checkbox("Add new broker not in list", key="add_new_broker")
+        if add_new_broker:
+            additional_brokers = st.text_input(
+                "New Broker(s)",
+                placeholder="Enter new broker names (comma-separated)",
+                key="additional_brokers",
+                help="Add brokers not in the list above"
+            )
+        else:
+            additional_brokers = ""
 
     # Create form
     with st.form("client_form", clear_on_submit=True):
@@ -409,24 +469,6 @@ def main():
                 help="Additional front-end details"
             )
 
-        # Service Providers
-        col1, col2 = st.columns(2)
-
-        with col1:
-            clearers = st.multiselect(
-                "Clearers",
-                options=clearer_list,
-                help="Clearing firms used (select multiple)"
-            )
-
-        with col2:
-            brokers = st.multiselect(
-                "Brokers",
-                options=broker_list,
-                help="Brokers used (select multiple)"
-            )
-
-
         # Source
         source = st.selectbox(
             "Source",
@@ -457,8 +499,18 @@ def main():
             else:
                 # Convert multi-select lists to comma-separated strings
                 front_end_str = ", ".join(front_end) if front_end else None
-                brokers_str = ", ".join(brokers) if brokers else None
-                clearers_str = ", ".join(clearers) if clearers else None
+
+                # Combine selected clearers with additional ones
+                all_clearers = list(clearers) if clearers else []
+                if additional_clearers:
+                    all_clearers.extend([c.strip() for c in additional_clearers.split(",") if c.strip()])
+                clearers_str = ", ".join(all_clearers) if all_clearers else None
+
+                # Combine selected brokers with additional ones
+                all_brokers = list(brokers) if brokers else []
+                if additional_brokers:
+                    all_brokers.extend([b.strip() for b in additional_brokers.split(",") if b.strip()])
+                brokers_str = ", ".join(all_brokers) if all_brokers else None
 
                 # Prepare data (no update_id or date - auto-generated in Snowflake)
                 data = {
