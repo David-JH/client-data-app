@@ -93,10 +93,15 @@ def get_snowflake_connection(schema="CLIENTS"):
 
 
 @st.cache_data(ttl=300)  # Cache for 5 minutes
-def get_company_list():
+def get_all_dropdown_lists():
     """
-    Fetch list of company names from COMPANY_NAMES view for autocomplete.
+    Fetch all dropdown lists (companies, brokers, clearers) using a single connection.
+    Returns a tuple of (companies, brokers, clearers).
     """
+    companies = []
+    brokers = []
+    clearers = []
+
     try:
         conn = snowflake.connector.connect(
             user=st.secrets["snowflake"]["user"],
@@ -107,64 +112,26 @@ def get_company_list():
             schema="CLIENTS"
         )
         cursor = conn.cursor()
+
+        # Fetch companies
         cursor.execute("SELECT COMPANY_NAME FROM COMPANY_NAMES ORDER BY COMPANY_NAME")
         companies = [row[0] for row in cursor.fetchall() if row[0]]
-        cursor.close()
-        conn.close()
-        return companies
-    except Exception as e:
-        st.error(f"Error fetching company list: {str(e)}")
-        return []
 
-
-@st.cache_data(ttl=300)  # Cache for 5 minutes
-def get_broker_list():
-    """
-    Fetch list of broker company names from BROKER_NAMES view.
-    """
-    try:
-        conn = snowflake.connector.connect(
-            user=st.secrets["snowflake"]["user"],
-            password=st.secrets["snowflake"]["password"],
-            account=st.secrets["snowflake"]["account"],
-            warehouse=st.secrets["snowflake"]["warehouse"],
-            database="INCUBEX_DATA_LAKE",
-            schema="CLIENTS"
-        )
-        cursor = conn.cursor()
+        # Fetch brokers
         cursor.execute("SELECT COMPANY_NAME FROM BROKER_NAMES ORDER BY COMPANY_NAME")
         brokers = [row[0] for row in cursor.fetchall() if row[0]]
-        cursor.close()
-        conn.close()
-        return brokers
-    except Exception as e:
-        st.error(f"Error fetching broker list: {str(e)}")
-        return []
 
-
-@st.cache_data(ttl=300)  # Cache for 5 minutes
-def get_clearer_list():
-    """
-    Fetch list of clearers from Snowflake.
-    """
-    try:
-        conn = snowflake.connector.connect(
-            user=st.secrets["snowflake"]["user"],
-            password=st.secrets["snowflake"]["password"],
-            account=st.secrets["snowflake"]["account"],
-            warehouse=st.secrets["snowflake"]["warehouse"],
-            database="INCUBEX_DATA_LAKE",
-            schema="CLIENTS"
-        )
-        cursor = conn.cursor()
+        # Fetch clearers
         cursor.execute("SELECT DISTINCT COMPANY_NAME FROM CLEARERS ORDER BY COMPANY_NAME")
         clearers = [row[0] for row in cursor.fetchall() if row[0]]
+
         cursor.close()
         conn.close()
-        return clearers
+
     except Exception as e:
-        st.error(f"Error fetching clearer list: {str(e)}")
-        return []
+        st.error(f"Error fetching dropdown lists: {str(e)}")
+
+    return companies, brokers, clearers
 
 
 def insert_client_data(data: dict) -> bool:
@@ -249,14 +216,8 @@ def main():
         st.balloons()
         st.session_state.show_success = False
 
-    # Fetch company list for autocomplete (outside form for caching)
-    company_list = get_company_list()
-
-    # Fetch broker list from Snowflake
-    broker_list = get_broker_list()
-
-    # Fetch clearer list from Snowflake
-    clearer_list = get_clearer_list()
+    # Fetch all dropdown lists using single connection
+    company_list, broker_list, clearer_list = get_all_dropdown_lists()
 
     # Company selection outside form for dynamic behavior
     company_selection = st.selectbox(
