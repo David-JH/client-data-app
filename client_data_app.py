@@ -176,6 +176,13 @@ def insert_client_data(data: dict) -> bool:
 def main():
     st.markdown('<p class="main-header">📊 Client Data Entry Form</p>', unsafe_allow_html=True)
     st.markdown("Enter client information below to add to the database.")
+
+    st.info("""
+**Required fields:** Company and Client Type (marked with *)
+
+**Note:** Resubmitting for an existing company will update the record.
+""")
+
     st.markdown("---")
 
     # Initialize session state for company fields
@@ -282,15 +289,6 @@ def main():
     # Create form
     with st.form("client_form", clear_on_submit=True):
 
-        # Client Status
-        client_status = st.selectbox(
-            "Client Status",
-            options=["Client", "Prospect", "Setting up"],
-            index=None,
-            placeholder="Select status...",
-            help="Current status of the client"
-        )
-
         # Client Type selection
         client_type = st.selectbox(
             "Client Type *",
@@ -298,6 +296,15 @@ def main():
             index=None,
             placeholder="Select client type...",
             help="Select the type of client"
+        )
+
+        # Client Status
+        client_status = st.selectbox(
+            "Client Status",
+            options=["Client", "Prospect", "Setting up"],
+            index=None,
+            placeholder="Select status...",
+            help="Current status of the client"
         )
 
         st.markdown('<p class="sub-header">Trading Information</p>', unsafe_allow_html=True)
@@ -499,7 +506,7 @@ def main():
                         "2.5-5k": 3750,     # midpoint of 2500-5000
                         "5-10k": 7500,      # midpoint of 5000-10000
                         "10-20k": 15000,    # midpoint of 10000-20000
-                        "20k+": 25000,      # representative value for 20k+
+                        "20k+": 20000,      # representative value for 20k+
                     }
                     eua_volume = range_midpoints.get(eua_volume_range)
 
