@@ -68,6 +68,10 @@ st.markdown("""
         color: #2E4A6F;
         margin-bottom: 0.5rem;
     }
+    /* Light pink background for required fields (Company and Client Type) */
+    .required-field div[data-baseweb="select"] > div {
+        background-color: #fff5f5 !important;
+    }
     </style>
 """, unsafe_allow_html=True)
 
@@ -227,6 +231,7 @@ def main():
     company_list, broker_list, clearer_list = get_all_dropdown_lists()
 
     # Company selection outside form for dynamic behavior
+    st.markdown('<div class="required-field">', unsafe_allow_html=True)
     company_selection = st.selectbox(
         "Company *",
         options=["Select a company...", "-- Enter new company --"] + company_list,
@@ -234,6 +239,7 @@ def main():
         key="company_selection",
         help="Select from list or choose 'Enter new company' to add a new prospect"
     )
+    st.markdown('</div>', unsafe_allow_html=True)
 
     # Show text input if user wants to enter a new company
     if company_selection == "-- Enter new company --":
@@ -290,6 +296,7 @@ def main():
     with st.form("client_form", clear_on_submit=True):
 
         # Client Type selection
+        st.markdown('<div class="required-field">', unsafe_allow_html=True)
         client_type = st.selectbox(
             "Client Type *",
             options=["Customer", "Clearer", "Broker"],
@@ -297,6 +304,7 @@ def main():
             placeholder="Select client type...",
             help="Select the type of client"
         )
+        st.markdown('</div>', unsafe_allow_html=True)
 
         # Client Status
         client_status = st.selectbox(
@@ -334,15 +342,7 @@ def main():
         )
 
         st.markdown('<p class="sub-header">Volume Information</p>', unsafe_allow_html=True)
-        st.caption("Please enter estimated or exact volume")
-
-        # Volumes - Stacked Vertically
-        overall_volume = st.number_input(
-            "Overall Volume (Lots)",
-            min_value=0,
-            value=None,
-            help="Total trading volume"
-        )
+        st.caption("Client's total annual volumes across all exchanges. Enter volume range or exact number per product.")
 
         # EUA Volume - Range dropdown OR exact number input
         st.markdown("EUA Volume (Lots)")
@@ -350,7 +350,7 @@ def main():
         with eua_col1:
             eua_volume_range = st.selectbox(
                 "Estimated Range",
-                options=[None, "<2.5k", "2.5-5k", "5-10k", "10-20k", "20k+"],
+                options=[None, "<2.5k", "2.5-5k", "5-10k", "10-20k", "20-50k", "50k+"],
                 index=0,
                 format_func=lambda x: "Select range..." if x is None else x,
                 help="Select an estimated volume range"
@@ -363,12 +363,26 @@ def main():
                 help="Or enter exact volume in lots"
             )
 
-        go_volume = st.number_input(
-            "GO Volume (Lots)",
-            min_value=0,
-            value=None,
-            help="Guarantees of Origin volume"
-        )
+        # GO Volume - Range dropdown OR exact number input
+        st.markdown("GO Volume (Lots)")
+        go_col1, go_col2 = st.columns(2)
+        with go_col1:
+            go_volume_range = st.selectbox(
+                "Estimated Range",
+                options=[None, "<2.5k", "2.5-5k", "5-10k", "10-20k", "20k+"],
+                index=0,
+                format_func=lambda x: "Select range..." if x is None else x,
+                help="Select an estimated volume range",
+                key="go_volume_range"
+            )
+        with go_col2:
+            go_volume_exact = st.number_input(
+                "Exact Volume",
+                min_value=0,
+                value=None,
+                help="Or enter exact volume in lots",
+                key="go_volume_exact"
+            )
 
         power_volume = st.number_input(
             "Power Volume (Lots)",
@@ -493,6 +507,17 @@ def main():
                     all_brokers.extend([b.strip() for b in additional_brokers.split(",") if b.strip()])
                 brokers_str = ", ".join(all_brokers) if all_brokers else None
 
+                # Range to midpoint mapping
+                range_midpoints = {
+                    "<2.5k": 1250,      # midpoint of 0-2500
+                    "2.5-5k": 3750,     # midpoint of 2500-5000
+                    "5-10k": 7500,      # midpoint of 5000-10000
+                    "10-20k": 15000,    # midpoint of 10000-20000
+                    "20-50k": 35000,    # midpoint of 20000-50000
+                    "50k+": 50000,      # representative value for 50k+
+                    "20k+": 20000,      # legacy value for GO volume
+                }
+
                 # Process EUA volume - exact value takes priority, otherwise use range midpoint
                 eua_volume = None
                 if eua_volume_exact is not None and eua_volume_exact > 0:
@@ -500,15 +525,16 @@ def main():
                     if eua_volume_range is not None:
                         st.info("Note: Using exact EUA volume value (range selection ignored)")
                 elif eua_volume_range is not None:
-                    # Convert range to midpoint
-                    range_midpoints = {
-                        "<2.5k": 1250,      # midpoint of 0-2500
-                        "2.5-5k": 3750,     # midpoint of 2500-5000
-                        "5-10k": 7500,      # midpoint of 5000-10000
-                        "10-20k": 15000,    # midpoint of 10000-20000
-                        "20k+": 20000,      # representative value for 20k+
-                    }
                     eua_volume = range_midpoints.get(eua_volume_range)
+
+                # Process GO volume - exact value takes priority, otherwise use range midpoint
+                go_volume = None
+                if go_volume_exact is not None and go_volume_exact > 0:
+                    go_volume = go_volume_exact
+                    if go_volume_range is not None:
+                        st.info("Note: Using exact GO volume value (range selection ignored)")
+                elif go_volume_range is not None:
+                    go_volume = range_midpoints.get(go_volume_range)
 
                 # Prepare data (no update_id or date - auto-generated in Snowflake)
                 data = {
@@ -518,7 +544,7 @@ def main():
                     'why_not_trading': why_not_trading if why_not_trading else None,
                     'barriers': barriers if barriers else None,
                     'decision_makers': decision_makers if decision_makers else None,
-                    'overall_volume': overall_volume,
+                    'overall_volume': None,
                     'eua_volume': eua_volume,
                     'go_volume': go_volume,
                     'power_volume': power_volume,
