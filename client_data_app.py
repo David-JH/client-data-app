@@ -429,6 +429,7 @@ def main():
                     "Brady (Igloo, Powerdesk, Crisk...)",
                     "Comcore",
                     "Eka",
+                    "Endure",
                     "Entrade",
                     "Entrader",
                     "Ignite",
