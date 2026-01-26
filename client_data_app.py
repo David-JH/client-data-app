@@ -152,12 +152,12 @@ def insert_client_data(data: dict) -> bool:
 
         insert_query = """
         INSERT INTO CLIENTS (
-            CLIENT_STATUS, CLIENT_TYPE, COMPANY, WHY_NOT_TRADING, BARRIERS,
+            CLIENT_STATUS, CLIENT_TYPE, COMPANY, SENSITIVITIES, BARRIERS,
             DECISION_MAKERS, OVERALL_VOLUME, EUA_VOLUME, GO_VOLUME,
             POWER_VOLUME, GAS_VOLUME, OTHER_PRODUCT_NOTES, ACCESS_TYPE,
             FRONT_END, FRONT_END_DETAILS, CLEARERS, BROKERS, ETRM, SOURCE, NOTES
         ) VALUES (
-            %(client_status)s, %(client_type)s, %(company)s, %(why_not_trading)s, %(barriers)s,
+            %(client_status)s, %(client_type)s, %(company)s, %(sensitivities)s, %(barriers)s,
             %(decision_makers)s, %(overall_volume)s, %(eua_volume)s, %(go_volume)s,
             %(power_volume)s, %(gas_volume)s, %(other_product_notes)s, %(access_type)s,
             %(front_end)s, %(front_end_details)s, %(clearers)s, %(brokers)s, %(etrm)s, %(source)s, %(notes)s
@@ -321,10 +321,10 @@ def main():
         col1, col2 = st.columns(2)
 
         with col1:
-            why_not_trading = st.text_area(
-                "Why Not Trading",
-                placeholder="e.g., Margin too high",
-                help="Reason if not trading"
+            sensitivities = st.text_area(
+                "Sensitivities",
+                placeholder="e.g. Margin, Liquidity, Fees",
+                help="Key issues that direct flow"
             )
 
         with col2:
@@ -542,7 +542,7 @@ def main():
                     'client_status': client_status if client_status else None,
                     'client_type': client_type,
                     'company': company,
-                    'why_not_trading': why_not_trading if why_not_trading else None,
+                    'sensitivities': sensitivities if sensitivities else None,
                     'barriers': barriers if barriers else None,
                     'decision_makers': decision_makers if decision_makers else None,
                     'overall_volume': None,
