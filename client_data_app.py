@@ -321,17 +321,27 @@ def main():
         col1, col2 = st.columns(2)
 
         with col1:
-            sensitivities = st.text_area(
+            sensitivities = st.multiselect(
                 "Sensitivities",
-                placeholder="e.g. Margin, Liquidity, Fees",
-                help="Key issues that direct flow"
+                options=["Margin", "Fees", "Liquidity"],
+                help="Key issues that direct flow (select multiple)"
             )
 
         with col2:
-            barriers = st.text_area(
+            barriers = st.multiselect(
                 "Barriers",
-                placeholder="e.g., Clearing not setup",
-                help="Barriers to trading"
+                options=[
+                    "ICE Default",
+                    "Fees",
+                    "Margin",
+                    "Liquidity",
+                    "IT Setup (us)",
+                    "IT Setup (them)",
+                    "Compliance",
+                    "Risk",
+                    "Onboarding/KYC"
+                ],
+                help="Barriers to trading (select multiple)"
             )
 
         # Decision Makers
@@ -383,20 +393,6 @@ def main():
                 help="Or enter exact volume in lots",
                 key="go_volume_exact"
             )
-
-        power_volume = st.number_input(
-            "Power Volume (Lots)",
-            min_value=0,
-            value=None,
-            help="Power trading volume"
-        )
-
-        gas_volume = st.number_input(
-            "Gas Volume (Lots)",
-            min_value=0,
-            value=None,
-            help="Gas trading volume"
-        )
 
         # Other Products
         other_product_notes = st.text_area(
@@ -484,7 +480,7 @@ def main():
         st.markdown("---")
 
         # Submit button
-        submitted = st.form_submit_button("Submit")
+        submitted = st.form_submit_button(label="**Submit**", width="stretch")
 
         if submitted:
             # Validation
@@ -537,19 +533,23 @@ def main():
                 elif go_volume_range is not None:
                     go_volume = range_midpoints.get(go_volume_range)
 
+                # Convert multiselect lists to comma-separated strings
+                sensitivities_str = ", ".join(sensitivities) if sensitivities else None
+                barriers_str = ", ".join(barriers) if barriers else None
+
                 # Prepare data (no update_id or date - auto-generated in Snowflake)
                 data = {
                     'client_status': client_status if client_status else None,
                     'client_type': client_type,
                     'company': company,
-                    'sensitivities': sensitivities if sensitivities else None,
-                    'barriers': barriers if barriers else None,
+                    'sensitivities': sensitivities_str,
+                    'barriers': barriers_str,
                     'decision_makers': decision_makers if decision_makers else None,
                     'overall_volume': None,
                     'eua_volume': eua_volume,
                     'go_volume': go_volume,
-                    'power_volume': power_volume,
-                    'gas_volume': gas_volume,
+                    'power_volume': None,
+                    'gas_volume': None,
                     'other_product_notes': other_product_notes if other_product_notes else None,
                     'access_type': access_type if access_type else None,
                     'front_end': front_end_str,
