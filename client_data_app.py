@@ -142,7 +142,7 @@ def get_all_data():
                    DECISION_MAKERS, EUA_VOLUME, GO_VOLUME, OTHER_PRODUCT_NOTES,
                    ACCESS_TYPE, FRONT_END, FRONT_END_DETAILS, CLEARERS, BROKERS,
                    ETRM, SOURCE, NOTES
-            FROM CLIENTS_CURRENT
+            FROM STREAMLIT_APP_VIEW
         """)
         columns = ['COMPANY', 'CLIENT_TYPE', 'CLIENT_STATUS', 'SENSITIVITIES', 'BARRIERS',
                    'DECISION_MAKERS', 'EUA_VOLUME', 'GO_VOLUME', 'OTHER_PRODUCT_NOTES',
@@ -156,7 +156,7 @@ def get_all_data():
                    DECISION_MAKERS, EUA_VOLUME, GO_VOLUME, OTHER_PRODUCT_NOTES,
                    ACCESS_TYPE, FRONT_END, FRONT_END_DETAILS, CLEARERS, BROKERS,
                    ETRM, SOURCE, NOTES
-            FROM CLIENTS_CURRENT
+            FROM STREAMLIT_APP_VIEW
             ORDER BY ENTRY_DATE DESC
             LIMIT 5
         """)
