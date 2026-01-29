@@ -124,17 +124,20 @@ def get_all_data():
     try:
         cursor = conn.cursor()
 
-        # Fetch companies
-        cursor.execute("SELECT COMPANY_NAME FROM COMPANY_NAMES ORDER BY COMPANY_NAME")
-        companies = [row[0] for row in cursor.fetchall() if row[0]]
-
-        # Fetch brokers
-        cursor.execute("SELECT COMPANY_NAME FROM BROKER_NAMES ORDER BY COMPANY_NAME")
-        brokers = [row[0] for row in cursor.fetchall() if row[0]]
-
-        # Fetch clearers
-        cursor.execute("SELECT DISTINCT COMPANY_NAME FROM CLEARERS ORDER BY COMPANY_NAME")
-        clearers = [row[0] for row in cursor.fetchall() if row[0]]
+        # Fetch all firm names (brokers, clearers, customers) in a single query
+        cursor.execute("""
+            SELECT DISTINCT BROKER, CLEARER, CUSTOMER
+            FROM ALL_FIRM_NAMES
+            WHERE BROKER IS NOT NULL OR CLEARER IS NOT NULL OR CUSTOMER IS NOT NULL
+            ORDER BY BROKER, CLEARER, CUSTOMER
+        """)
+        for row in cursor.fetchall():
+            if row[0]:  # BROKER column
+                brokers.append(row[0])
+            if row[1]:  # CLEARER column
+                clearers.append(row[1])
+            if row[2]:  # CUSTOMER column
+                companies.append(row[2])
 
         # Fetch all client data from STREAMLIT_APP_VIEW view
         cursor.execute("""
@@ -534,7 +537,6 @@ def main():
             go_volume_range = st.selectbox(
                 "Estimated Range",
                 options=[None, "<2.5k", "2.5-5k", "5-10k", "10-20k", "20k+"],
-                index=0,
                 format_func=lambda x: "Select range..." if x is None else x,
                 help="Select an estimated volume range",
                 key="go_volume_range"
@@ -543,7 +545,6 @@ def main():
             go_volume_exact = st.number_input(
                 "Exact Volume",
                 min_value=0,
-                value=prefill.get('go_volume'),
                 help="Or enter exact volume in lots",
                 key="go_volume_exact"
             )
