@@ -136,7 +136,7 @@ def get_all_data():
         cursor.execute("SELECT DISTINCT COMPANY_NAME FROM CLEARERS ORDER BY COMPANY_NAME")
         clearers = [row[0] for row in cursor.fetchall() if row[0]]
 
-        # Fetch all client data from CLIENTS_CURRENT view
+        # Fetch all client data from STREAMLIT_APP_VIEW view
         cursor.execute("""
             SELECT COMPANY, CLIENT_TYPE, CLIENT_STATUS, SENSITIVITIES, BARRIERS,
                    DECISION_MAKERS, EUA_VOLUME, GO_VOLUME, OTHER_PRODUCT_NOTES,
