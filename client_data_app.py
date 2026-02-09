@@ -7,6 +7,18 @@ import streamlit as st
 import snowflake.connector
 from datetime import date, datetime
 import pandas as pd
+import json
+
+# Impact level mappings: label <-> numeric value
+IMPACT_LABEL_TO_VALUE = {
+    "No Impact": 0.0,
+    "Frustration/Annoyance": 0.25,
+    "Tangible impact": 0.5,
+    "Major issue": 0.75,
+    "Complete dealbreaker": 1.0
+}
+IMPACT_VALUE_TO_LABEL = {v: k for k, v in IMPACT_LABEL_TO_VALUE.items()}
+IMPACT_OPTIONS = list(IMPACT_LABEL_TO_VALUE.keys())
 
 # Page configuration
 st.set_page_config(
@@ -187,6 +199,38 @@ def parse_comma_string(value: str) -> list:
     return [item.strip() for item in str(value).split(",") if item.strip()]
 
 
+def parse_sensitivities_json(value) -> dict:
+    """
+    Parse sensitivities from JSON/VARIANT format.
+    Converts numeric values to labels for display.
+    Returns dict like {'Margin': 'Major issue'}.
+    """
+    if not value or pd.isna(value):
+        return {}
+    # Snowflake VARIANT comes through as dict or JSON string
+    raw_dict = {}
+    if isinstance(value, dict):
+        raw_dict = value
+    elif isinstance(value, str):
+        try:
+            raw_dict = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+    else:
+        return {}
+
+    # Convert numeric values to labels
+    result = {}
+    for sens, impact in raw_dict.items():
+        if isinstance(impact, (int, float)):
+            # Convert numeric to label
+            result[sens] = IMPACT_VALUE_TO_LABEL.get(float(impact), IMPACT_OPTIONS[0])
+        else:
+            # Already a label string
+            result[sens] = impact
+    return result
+
+
 def get_prefill_data(clients_df: pd.DataFrame, company: str, client_type: str) -> dict:
     """
     Get prefill data for a specific company and client type combination.
@@ -202,9 +246,11 @@ def get_prefill_data(clients_df: pd.DataFrame, company: str, client_type: str) -
         return {}
 
     row = matched.iloc[0]
+    sensitivities_dict = parse_sensitivities_json(row['SENSITIVITIES'])
     return {
         'client_status': row['CLIENT_STATUS'] if pd.notna(row['CLIENT_STATUS']) else None,
-        'sensitivities': parse_comma_string(row['SENSITIVITIES']),
+        'sensitivities': list(sensitivities_dict.keys()),  # List of selected sensitivities
+        'sensitivities_impact': sensitivities_dict,  # Dict with impact levels
         'barriers': parse_comma_string(row['BARRIERS']),
         'decision_makers': row['DECISION_MAKERS'] if pd.notna(row['DECISION_MAKERS']) else "",
         'eua_volume': int(float(row['EUA_VOLUME'])) if pd.notna(row['EUA_VOLUME']) else None,
@@ -239,12 +285,12 @@ def insert_client_data(data: dict) -> bool:
             DECISION_MAKERS, OVERALL_VOLUME, EUA_VOLUME, GO_VOLUME,
             POWER_VOLUME, GAS_VOLUME, OTHER_PRODUCT_NOTES, ACCESS_TYPE,
             FRONT_END, FRONT_END_DETAILS, CLEARERS, BROKERS, ETRM, SOURCE, NOTES
-        ) VALUES (
-            %(client_status)s, %(client_type)s, %(company)s, %(sensitivities)s, %(barriers)s,
+        )
+        SELECT
+            %(client_status)s, %(client_type)s, %(company)s, PARSE_JSON(%(sensitivities)s), %(barriers)s,
             %(decision_makers)s, %(overall_volume)s, %(eua_volume)s, %(go_volume)s,
             %(power_volume)s, %(gas_volume)s, %(other_product_notes)s, %(access_type)s,
             %(front_end)s, %(front_end_details)s, %(clearers)s, %(brokers)s, %(etrm)s, %(source)s, %(notes)s
-        )
         """
 
         cursor.execute(insert_query, data)
@@ -267,7 +313,7 @@ def main():
     st.info("""
 **Required fields:** Company and Client Type (marked with *)
 
-**Note:** Resubmitting for an existing company will update the record.
+**Note:** Resubmitting for an existing company will update the record. Click **Submit** at the bottom to save.
 """)
 
     with st.expander("📖 User Guide"):
@@ -294,7 +340,7 @@ def main():
 - Click "Refresh Data" below the Submit button to reload the latest data from the database
 """)
 
-    st.markdown("---")
+    st.markdown("<hr style='border: 2px solid #ccc; margin: 2rem 0;'>", unsafe_allow_html=True)
 
     # Initialize session state for company fields
     if 'company_selection' not in st.session_state:
@@ -332,6 +378,11 @@ def main():
         st.session_state.go_volume_range = None
         st.session_state.go_volume_exact = None
         st.session_state.previous_selection = None
+        # Reset sensitivities
+        for sens in ["Margin", "Fees", "Liquidity"]:
+            st.session_state[f"sens_{sens}"] = False
+            if f"sens_impact_{sens}" in st.session_state:
+                del st.session_state[f"sens_impact_{sens}"]
         st.session_state.reset_company_fields = False
 
     # Show success message and balloons after rerun
@@ -343,39 +394,39 @@ def main():
     # Fetch all data using single connection
     company_list, broker_list, clearer_list, clients_df, recent_df = get_all_data()
 
-    # Company selection outside form for dynamic behavior
-    st.markdown('<div class="required-field">', unsafe_allow_html=True)
-    company_selection = st.selectbox(
-        "Company *",
-        options=["Select a company...", "-- Enter new company --"] + company_list,
-        index=0,
-        key="company_selection",
-        help="Select from list or choose 'Enter new company' to add a new prospect"
-    )
-    st.markdown('</div>', unsafe_allow_html=True)
+    # Required Info section in bordered container
+    with st.container(border=True):
+        st.markdown("**Required Info**")
 
-    # Show text input if user wants to enter a new company
-    if company_selection == "-- Enter new company --":
-        company = st.text_input(
-            "New Company Name *",
-            placeholder="Enter company name...",
-            key="new_company_name",
-            help="Type the name of the new company/prospect"
+        # Company selection outside form for dynamic behavior
+        company_selection = st.selectbox(
+            "Company *",
+            options=["Select a company...", "-- Enter new company --"] + company_list,
+            index=0,
+            key="company_selection",
+            help="Select from list or choose 'Enter new company' to add a new prospect"
         )
-    else:
-        company = company_selection
 
-    # Client Type selection outside form for dynamic prefill
-    st.markdown('<div class="required-field">', unsafe_allow_html=True)
-    client_type = st.selectbox(
-        "Client Type *",
-        options=["Customer", "Clearer", "Broker"],
-        index=None,
-        placeholder="Select client type...",
-        key="client_type_selection",
-        help="Select the type of client"
-    )
-    st.markdown('</div>', unsafe_allow_html=True)
+        # Show text input if user wants to enter a new company
+        if company_selection == "-- Enter new company --":
+            company = st.text_input(
+                "New Company Name *",
+                placeholder="Enter company name...",
+                key="new_company_name",
+                help="Type the name of the new company/prospect"
+            )
+        else:
+            company = company_selection
+
+        # Client Type selection outside form for dynamic prefill
+        client_type = st.selectbox(
+            "Client Type *",
+            options=["Customer", "Clearer", "Broker"],
+            index=None,
+            placeholder="Select client type...",
+            key="client_type_selection",
+            help="Select the type of client"
+        )
 
     # Get prefill data based on Company + Client Type selection
     prefill = get_prefill_data(clients_df, company, client_type)
@@ -392,12 +443,24 @@ def main():
             st.session_state.brokers = prefill.get('brokers', [])
             st.session_state.go_volume_range = None
             st.session_state.go_volume_exact = prefill.get('go_volume')
+            # Update sensitivities checkboxes and impact dropdowns
+            prefill_sens = prefill.get('sensitivities', [])
+            prefill_impact = prefill.get('sensitivities_impact', {})
+            for sens in ["Margin", "Fees", "Liquidity"]:
+                st.session_state[f"sens_{sens}"] = sens in prefill_sens
+                if sens in prefill_impact:
+                    st.session_state[f"sens_impact_{sens}"] = prefill_impact[sens]
         else:
             # Clear if no prefill data for new selection
             st.session_state.clearers = []
             st.session_state.brokers = []
             st.session_state.go_volume_range = None
             st.session_state.go_volume_exact = None
+            # Clear sensitivities
+            for sens in ["Margin", "Fees", "Liquidity"]:
+                st.session_state[f"sens_{sens}"] = False
+                if f"sens_impact_{sens}" in st.session_state:
+                    del st.session_state[f"sens_impact_{sens}"]
 
     # Clearers and Brokers outside form for dynamic checkbox behavior
     st.markdown('<p class="sub-header">Service Providers</p>', unsafe_allow_html=True)
@@ -451,6 +514,36 @@ def main():
         else:
             additional_brokers = ""
 
+    # Sensitivities section - outside form for dynamic behavior
+    st.markdown('<p class="sub-header">Trading Information</p>', unsafe_allow_html=True)
+
+    sensitivities_options = ["Margin", "Fees", "Liquidity"]
+
+    with st.container(border=True):
+        st.markdown("**Sensitivities**")
+        st.caption("Key issues that direct flow - select impact level for each")
+
+        sensitivities_with_impact = {}
+        for sens in sensitivities_options:
+            sens_col1, sens_col2 = st.columns([1, 2])
+            with sens_col1:
+                # Initialize session state if not exists
+                if f"sens_{sens}" not in st.session_state:
+                    st.session_state[f"sens_{sens}"] = False
+                selected = st.checkbox(sens, key=f"sens_{sens}")
+            with sens_col2:
+                if selected:
+                    # Initialize impact session state if not exists
+                    if f"sens_impact_{sens}" not in st.session_state:
+                        st.session_state[f"sens_impact_{sens}"] = IMPACT_OPTIONS[0]
+                    impact = st.selectbox(
+                        f"{sens} impact",
+                        options=IMPACT_OPTIONS,
+                        key=f"sens_impact_{sens}",
+                        label_visibility="collapsed"
+                    )
+                    sensitivities_with_impact[sens] = impact
+
     # Create form
     with st.form("client_form", clear_on_submit=True):
 
@@ -467,38 +560,24 @@ def main():
             help="Current status of the client"
         )
 
-        st.markdown('<p class="sub-header">Trading Information</p>', unsafe_allow_html=True)
-
-        # Trading Info
-        col1, col2 = st.columns(2)
-
-        with col1:
-            sensitivities_options = ["Margin", "Fees", "Liquidity"]
-            sensitivities = st.multiselect(
-                "Sensitivities",
-                options=sensitivities_options,
-                default=[s for s in prefill.get('sensitivities', []) if s in sensitivities_options],
-                help="Key issues that direct flow (select multiple)"
-            )
-
-        with col2:
-            barriers_options = [
-                "ICE Default",
-                "Fees",
-                "Margin",
-                "Liquidity",
-                "IT Setup (us)",
-                "IT Setup (them)",
-                "Compliance",
-                "Risk",
-                "Onboarding/KYC"
-            ]
-            barriers = st.multiselect(
-                "Barriers",
-                options=barriers_options,
-                default=[b for b in prefill.get('barriers', []) if b in barriers_options],
-                help="Barriers to trading (select multiple)"
-            )
+        # Barriers
+        barriers_options = [
+            "ICE Default",
+            "Fees",
+            "Margin",
+            "Liquidity",
+            "IT Setup (us)",
+            "IT Setup (them)",
+            "Compliance",
+            "Risk",
+            "Onboarding/KYC"
+        ]
+        barriers = st.multiselect(
+            "Barriers",
+            options=barriers_options,
+            default=[b for b in prefill.get('barriers', []) if b in barriers_options],
+            help="Barriers to trading (select multiple)"
+        )
 
         # Decision Makers - with prefill
         decision_makers = st.text_input(
@@ -705,8 +784,14 @@ def main():
                 elif go_volume_range is not None:
                     go_volume = range_midpoints.get(go_volume_range)
 
-                # Convert multiselect lists to comma-separated strings
-                sensitivities_str = ", ".join(sensitivities) if sensitivities else None
+                # Convert sensitivities with impact levels to JSON string for VARIANT column
+                # Store numeric values: {"Margin": 0.75, "Fees": 0.5}
+                sensitivities_numeric = {
+                    sens: IMPACT_LABEL_TO_VALUE.get(label, 0.0)
+                    for sens, label in sensitivities_with_impact.items()
+                }
+                sensitivities_json = json.dumps(sensitivities_numeric) if sensitivities_numeric else None
+                sensitivities = list(sensitivities_with_impact.keys())  # For has_changed comparison
                 barriers_str = ", ".join(barriers) if barriers else None
 
                 # Helper function to check if a value has changed from prefill
@@ -734,7 +819,7 @@ def main():
                     'client_status': (client_status if client_status else None) if has_changed('client_status', client_status) else None,
                     'client_type': client_type,  # Always save
                     'company': company,  # Always save
-                    'sensitivities': sensitivities_str if has_changed('sensitivities', sensitivities, is_list=True) else None,
+                    'sensitivities': sensitivities_json if has_changed('sensitivities', sensitivities, is_list=True) else None,
                     'barriers': barriers_str if has_changed('barriers', barriers, is_list=True) else None,
                     'decision_makers': (decision_makers if decision_makers else None) if has_changed('decision_makers', decision_makers) else None,
                     'overall_volume': None,
