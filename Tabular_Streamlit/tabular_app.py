@@ -161,6 +161,17 @@ def collect_panel_edits(row_idx: int) -> dict:
     return {"sensitivities": sens, "barriers": blocks}
 
 
+def _normalise(value):
+    """Collapse NaN / None / empty-string into None for comparison."""
+    if value is None:
+        return None
+    if isinstance(value, float) and pd.isna(value):
+        return None
+    if isinstance(value, str) and value.strip() == "":
+        return None
+    return value
+
+
 # == Load data =================================================================
 
 df = fetch_view_data()
@@ -176,9 +187,14 @@ if "original_df" not in st.session_state or st.session_state.get("force_reload")
     st.session_state.active_edit_row = None
     st.session_state.active_info_row = None
     st.session_state.panel_edits = {}  # {row_idx: {"sensitivities": {...}, "barriers": {...}}}
+    st.session_state.inline_edits = {}  # {row_idx: {col: value}} — survives filter changes
     st.session_state.pending_changes = None
     st.session_state.submit_result = None
     st.session_state.force_reload = False
+
+# Ensure inline_edits exists for sessions that started before this feature was added.
+if "inline_edits" not in st.session_state:
+    st.session_state.inline_edits = {}
 
 
 # == Collect panel edits FIRST (before building display) =======================
@@ -206,6 +222,16 @@ for idx, pe in st.session_state.panel_edits.items():
         block_labels = _panel_edit_to_labels(pe, "barriers")
         working.at[idx, "SENSITIVITIES"] = _labels_to_display(sens_labels)
         working.at[idx, "BARRIERS"] = _labels_to_display(block_labels)
+
+# Apply stored inline edits so they survive filter changes in the data editor.
+# When the user switches filter, st.data_editor resets its widget state.
+# By writing the edits into working_df, the data_editor input data already
+# contains the correct values, so they appear in the grid and flow through
+# to edited_df on the next rerun.
+for idx, col_edits in st.session_state.inline_edits.items():
+    if idx < len(working):
+        for col, val in col_edits.items():
+            working.at[idx, col] = val
 
 # Add EDIT and INFO checkbox columns -- tick the active rows
 working_with_edit = working.copy()
@@ -334,6 +360,36 @@ edited_df = st.data_editor(
     disabled=READ_ONLY_COLUMNS,
     key="client_data_editor",
 )
+
+
+# == Capture inline edits =====================================================
+# After every rerun, compare visible rows in edited_df against original_df.
+# Any differences are stored in session state so they survive when the user
+# changes the search filter (which resets the data_editor widget state).
+# Because inline_edits are applied to working_df *before* the editor renders,
+# previously-stored edits flow through as input data and reappear here even
+# after a widget reset — preserving them until the user reverts or submits.
+
+for _cap_idx in edited_df.index:
+    _cap_orig = st.session_state.original_df.loc[_cap_idx]
+    _cap_edit = edited_df.loc[_cap_idx]
+    _cap_row_edits = {}
+    for _cap_col in EDITABLE_COLUMNS:
+        _cap_orig_val = _normalise(_cap_orig[_cap_col])
+        _cap_edit_val = _normalise(_cap_edit[_cap_col])
+        if _cap_col in ("EUA_VOLUME", "GO_VOLUME"):
+            _cap_orig_num = None if _cap_orig_val is None else float(_cap_orig_val)
+            _cap_edit_num = None if _cap_edit_val is None else float(_cap_edit_val)
+            if _cap_orig_num != _cap_edit_num:
+                _cap_row_edits[_cap_col] = _cap_edit[_cap_col]
+        else:
+            if _cap_orig_val != _cap_edit_val:
+                _cap_row_edits[_cap_col] = _cap_edit[_cap_col]
+    if _cap_row_edits:
+        st.session_state.inline_edits[_cap_idx] = _cap_row_edits
+    elif _cap_idx in st.session_state.inline_edits:
+        # User reverted all changes for this row — remove it
+        del st.session_state.inline_edits[_cap_idx]
 
 
 # == Panel enforcement (one panel at a time: Edit OR Info) =====================
@@ -533,17 +589,6 @@ elif st.session_state.active_info_row is not None:
 
 # == Change detection ==========================================================
 
-def _normalise(value):
-    """Collapse NaN / None / empty-string into None for comparison."""
-    if value is None:
-        return None
-    if isinstance(value, float) and pd.isna(value):
-        return None
-    if isinstance(value, str) and value.strip() == "":
-        return None
-    return value
-
-
 def _dicts_equal(a, b) -> bool:
     """Compare two dicts treating None / empty dict as equal."""
     a = a if isinstance(a, dict) else {}
@@ -552,7 +597,8 @@ def _dicts_equal(a, b) -> bool:
 
 
 def detect_changes(
-    original: pd.DataFrame, edited: pd.DataFrame, panel_edits: dict
+    original: pd.DataFrame, edited: pd.DataFrame, panel_edits: dict,
+    inline_edits: dict,
 ) -> list[dict]:
     """
     Compare every editable cell and panel field.
@@ -629,8 +675,9 @@ def detect_changes(
         if row_changed:
             changed_rows.append(row_data)
 
-    # Also check panel edits for rows NOT currently visible (filtered out).
-    for idx, pe in panel_edits.items():
+    # Also check inline edits and panel edits for rows NOT currently visible.
+    offscreen_indices = set(inline_edits.keys()) | set(panel_edits.keys())
+    for idx in offscreen_indices:
         if idx in checked_indices:
             continue
         orig_row = original.loc[idx]
@@ -641,25 +688,51 @@ def detect_changes(
             "power_volume": None,
             "gas_volume": None,
         }
-        # No inline edits for filtered-out rows; set all to None
-        for col in EDITABLE_COLUMNS:
-            row_data[col.lower()] = None
-
         row_changed = False
-        orig_sens = orig_row.get("_SENSITIVITIES_RAW", {}) or {}
-        new_sens = pe.get("sensitivities", {})
-        if not _dicts_equal(orig_sens, new_sens):
-            row_changed = True
-            row_data["sensitivities"] = json.dumps(new_sens) if new_sens else None
+
+        # -- Inline column edits for filtered-out rows ----------------------
+        ie = inline_edits.get(idx, {})
+        for col in EDITABLE_COLUMNS:
+            if col in ie:
+                orig_val = _normalise(orig_row[col])
+                edit_val = _normalise(ie[col])
+                if col in ("EUA_VOLUME", "GO_VOLUME"):
+                    orig_num = None if orig_val is None else float(orig_val)
+                    edit_num = None if edit_val is None else float(edit_val)
+                    if orig_num != edit_num:
+                        row_changed = True
+                        row_data[col.lower()] = int(edit_num) if edit_num is not None else None
+                    else:
+                        row_data[col.lower()] = None
+                else:
+                    if orig_val != edit_val:
+                        row_changed = True
+                        row_data[col.lower()] = edit_val
+                    else:
+                        row_data[col.lower()] = None
+            else:
+                row_data[col.lower()] = None
+
+        # -- Panel-edited columns (Sensitivities & Blockers) ----------------
+        pe = panel_edits.get(idx)
+        if pe:
+            orig_sens = orig_row.get("_SENSITIVITIES_RAW", {}) or {}
+            new_sens = pe.get("sensitivities", {})
+            if not _dicts_equal(orig_sens, new_sens):
+                row_changed = True
+                row_data["sensitivities"] = json.dumps(new_sens) if new_sens else None
+            else:
+                row_data["sensitivities"] = None
+
+            orig_barriers = orig_row.get("_BARRIERS_RAW", {}) or {}
+            new_barriers = pe.get("barriers", {})
+            if not _dicts_equal(orig_barriers, new_barriers):
+                row_changed = True
+                row_data["barriers"] = json.dumps(new_barriers) if new_barriers else None
+            else:
+                row_data["barriers"] = None
         else:
             row_data["sensitivities"] = None
-
-        orig_barriers = orig_row.get("_BARRIERS_RAW", {}) or {}
-        new_barriers = pe.get("barriers", {})
-        if not _dicts_equal(orig_barriers, new_barriers):
-            row_changed = True
-            row_data["barriers"] = json.dumps(new_barriers) if new_barriers else None
-        else:
             row_data["barriers"] = None
 
         if row_changed:
@@ -728,7 +801,8 @@ def confirm_submit_dialog():
 
 if submit_clicked:
     changed = detect_changes(
-        st.session_state.original_df, edited_df, st.session_state.panel_edits
+        st.session_state.original_df, edited_df,
+        st.session_state.panel_edits, st.session_state.inline_edits,
     )
     if not changed:
         st.info("No changes detected.")
