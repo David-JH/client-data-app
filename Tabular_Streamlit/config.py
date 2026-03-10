@@ -56,8 +56,13 @@ VIEW_COLUMNS = [
 
 KEY_COLUMNS = ["COMPANY", "CLIENT_TYPE"]
 
-# Columns disabled in the data editor (not inline-editable)
-READ_ONLY_COLUMNS = ["COMPANY", "CLIENT_TYPE", "EEX_KAM", "INCUBEX_KAM", "ENTRY_DATE", "SENSITIVITIES", "BARRIERS"]
+# Columns disabled in the data editor (not inline-editable).
+# Note: EEX_KAM and INCUBEX_KAM are NOT read-only — they are editable so
+# users can assign KAMs to prospects (written to PROSPECT_KAM, not CLIENTS).
+READ_ONLY_COLUMNS = ["COMPANY", "CLIENT_TYPE", "ENTRY_DATE", "SENSITIVITIES", "BARRIERS"]
+
+# KAM columns — editable inline, but routed to PROSPECT_KAM table on submit
+KAM_COLUMNS = ["EEX_KAM", "INCUBEX_KAM"]
 
 # Columns editable inline in the data editor
 EDITABLE_COLUMNS = [
