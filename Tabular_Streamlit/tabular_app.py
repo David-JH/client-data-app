@@ -26,7 +26,7 @@ from config import (
     COLUMN_PRESETS,
     get_column_config,
 )
-from db import fetch_view_data, insert_changed_rows
+from db import fetch_view_data, fetch_firm_names, insert_changed_rows
 
 # == Page config ===============================================================
 
@@ -175,10 +175,17 @@ def _normalise(value):
 # == Load data =================================================================
 
 df = fetch_view_data()
+broker_list, clearer_list = fetch_firm_names()
 
 if df.empty:
     st.warning("No data returned from STREAMLIT_APP_VIEW2.")
     st.stop()
+
+# Extend dropdown lists with any values already in the data but missing from master list
+existing_brokers = df["BROKERS"].dropna().unique().tolist()
+existing_clearers = df["CLEARERS"].dropna().unique().tolist()
+broker_list = sorted(set(broker_list) | set(b for b in existing_brokers if b))
+clearer_list = sorted(set(clearer_list) | set(c for c in existing_clearers if c))
 
 # Initialise session state on first load or after explicit refresh.
 if "original_df" not in st.session_state or st.session_state.get("force_reload"):
@@ -186,15 +193,18 @@ if "original_df" not in st.session_state or st.session_state.get("force_reload")
     st.session_state.working_df = df.copy(deep=True)
     st.session_state.active_edit_row = None
     st.session_state.active_info_row = None
+    st.session_state.active_notes_row = None
     st.session_state.panel_edits = {}  # {row_idx: {"sensitivities": {...}, "barriers": {...}}}
     st.session_state.inline_edits = {}  # {row_idx: {col: value}} — survives filter changes
     st.session_state.pending_changes = None
     st.session_state.submit_result = None
     st.session_state.force_reload = False
 
-# Ensure inline_edits exists for sessions that started before this feature was added.
+# Ensure keys exist for sessions that started before these features were added.
 if "inline_edits" not in st.session_state:
     st.session_state.inline_edits = {}
+if "active_notes_row" not in st.session_state:
+    st.session_state.active_notes_row = None
 
 
 # == Collect panel edits FIRST (before building display) =======================
@@ -210,6 +220,28 @@ if st.session_state.active_edit_row is not None:
     # empty values from non-existent widgets.
     if st.session_state.get(f"_panel_rendered_{active}", False):
         st.session_state.panel_edits[active] = collect_panel_edits(active)
+
+
+# == Collect notes panel edit FIRST =============================================
+# Read the "new note" text_area at the start of each rerun.
+# A non-empty new note is stored into inline_edits so it survives filter
+# changes and gets picked up by detect_changes on submit.
+
+if st.session_state.active_notes_row is not None:
+    _notes_idx = st.session_state.active_notes_row
+    _notes_key = f"notes_new_{_notes_idx}"
+    if _notes_key in st.session_state:
+        _new_note = (st.session_state[_notes_key] or "").strip()
+        if _new_note:
+            if _notes_idx not in st.session_state.inline_edits:
+                st.session_state.inline_edits[_notes_idx] = {}
+            st.session_state.inline_edits[_notes_idx]["NOTES"] = _new_note
+        else:
+            # User cleared the new-note box — remove NOTES from inline_edits
+            if _notes_idx in st.session_state.inline_edits:
+                st.session_state.inline_edits[_notes_idx].pop("NOTES", None)
+                if not st.session_state.inline_edits[_notes_idx]:
+                    del st.session_state.inline_edits[_notes_idx]
 
 
 # == Apply live preview: update display strings from accumulated panel edits ===
@@ -243,6 +275,13 @@ if active_row is not None and active_row < len(working_with_edit):
 active_info = st.session_state.active_info_row
 if active_info is not None and active_info < len(working_with_edit):
     working_with_edit.at[active_info, "INFO"] = True
+
+# NOTES_EDIT checkbox — only meaningful in "Meeting Notes" preset but always
+# present in the DataFrame so column_order can reference it.
+working_with_edit["NOTES_EDIT"] = False
+active_notes = st.session_state.active_notes_row
+if active_notes is not None and active_notes < len(working_with_edit):
+    working_with_edit.at[active_notes, "NOTES_EDIT"] = True
 
 
 # == Search ====================================================================
@@ -295,11 +334,14 @@ selected_preset = st.segmented_control(
     key="column_preset",
 )
 
-# Clear edit panel if the selected preset hides the EDIT column
+# Clear panels if the selected preset hides their trigger columns
 preset_columns = COLUMN_PRESETS.get(selected_preset or "All")
 if preset_columns is not None and "EDIT" not in preset_columns:
     if st.session_state.get("active_edit_row") is not None:
         st.session_state.active_edit_row = None
+if preset_columns is not None and "NOTES_EDIT" not in preset_columns:
+    if st.session_state.get("active_notes_row") is not None:
+        st.session_state.active_notes_row = None
 
 
 # == Date-based colour coding ==================================================
@@ -335,7 +377,7 @@ _full_col_order = _col_order_prefix + [
     "SENSITIVITIES", "BARRIERS", "EDIT",
     "DECISION_MAKERS", "EUA_VOLUME", "GO_VOLUME",
     "OTHER_PRODUCT_NOTES", "ACCESS_TYPE", "FRONT_END", "FRONT_END_DETAILS",
-    "CLEARERS", "BROKERS", "ETRM", "SOURCE", "NOTES", "ENTRY_DATE",
+    "CLEARERS", "BROKERS", "ETRM", "SOURCE", "NOTES", "NOTES_EDIT", "ENTRY_DATE",
     "INFO",  # Always far right
 ]
 
@@ -352,7 +394,7 @@ else:
 
 edited_df = st.data_editor(
     styled_df,
-    column_config=get_column_config(),
+    column_config=get_column_config(broker_options=broker_list, clearer_options=clearer_list),
     column_order=_col_order,
     use_container_width=True,
     hide_index=True,
@@ -392,14 +434,15 @@ for _cap_idx in edited_df.index:
         del st.session_state.inline_edits[_cap_idx]
 
 
-# == Panel enforcement (one panel at a time: Edit OR Info) =====================
+# == Panel enforcement (one panel at a time: Edit, Info, or Notes) =============
 
-def _resolve_checkbox(col_name, prev_active_key, other_active_key):
-    """Resolve a checkbox column, ensuring only one row is active and
-    closing the other panel type if this one is newly activated.
+def _resolve_checkbox(col_name, prev_active_key):
+    """Resolve a checkbox column, ensuring only one row is active.
 
     Returns the new active row index (or None).
     """
+    if col_name not in edited_df.columns:
+        return st.session_state.get(prev_active_key)
     ticked = edited_df.index[edited_df[col_name] == True].tolist()
     prev = st.session_state[prev_active_key]
 
@@ -414,29 +457,40 @@ def _resolve_checkbox(col_name, prev_active_key, other_active_key):
         return None
 
 
-new_edit = _resolve_checkbox("EDIT", "active_edit_row", "active_info_row")
-new_info = _resolve_checkbox("INFO", "active_info_row", "active_edit_row")
+new_edit = _resolve_checkbox("EDIT", "active_edit_row")
+new_info = _resolve_checkbox("INFO", "active_info_row")
+new_notes = _resolve_checkbox("NOTES_EDIT", "active_notes_row")
 
 needs_rerun = False
 
 # -- Edit column changed
 if new_edit != st.session_state.active_edit_row:
-    # Clear rendered flag for the old panel row (if any)
     old_edit = st.session_state.active_edit_row
     if old_edit is not None:
         st.session_state.pop(f"_panel_rendered_{old_edit}", None)
     st.session_state.active_edit_row = new_edit
     if new_edit is not None:
-        # Close info panel when edit panel opens
+        # Close other panels when edit panel opens
         st.session_state.active_info_row = None
+        st.session_state.active_notes_row = None
     needs_rerun = True
 
 # -- Info column changed
 if new_info != st.session_state.active_info_row:
     st.session_state.active_info_row = new_info
     if new_info is not None:
-        # Close edit panel when info panel opens
+        # Close other panels when info panel opens
         st.session_state.active_edit_row = None
+        st.session_state.active_notes_row = None
+    needs_rerun = True
+
+# -- Notes Edit column changed
+if new_notes != st.session_state.active_notes_row:
+    st.session_state.active_notes_row = new_notes
+    if new_notes is not None:
+        # Close other panels when notes panel opens
+        st.session_state.active_edit_row = None
+        st.session_state.active_info_row = None
     needs_rerun = True
 
 if needs_rerun:
@@ -577,6 +631,53 @@ def render_info_panel(row_idx: int):
                 st.markdown(f"**{label}:** {date_str}")
 
 
+# == Notes edit panel ==========================================================
+
+def render_notes_panel(row_idx: int):
+    """Render a two-box notes panel: read-only existing notes + empty new note."""
+    orig_row = st.session_state.original_df.iloc[row_idx]
+    company = orig_row["COMPANY"]
+    client_type = orig_row["CLIENT_TYPE"]
+
+    existing_notes = orig_row.get("NOTES", "") or ""
+
+    # If the user already typed a new note (stored in inline_edits), show it
+    pending_new = st.session_state.inline_edits.get(row_idx, {}).get("NOTES", "")
+
+    with st.container(border=True):
+        st.markdown(
+            f'<p class="sub-header">Notes: {company} ({client_type})</p>',
+            unsafe_allow_html=True,
+        )
+
+        col_existing, col_new = st.columns(2)
+
+        with col_existing:
+            st.markdown("**Current Notes (read-only)**")
+            # Use a styled div instead of a disabled text_area so the text
+            # is selectable / copyable and rendered in a darker font.
+            _escaped = existing_notes.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            _html_notes = _escaped.replace("\n", "<br>") if _escaped else "<em>No notes yet.</em>"
+            st.markdown(
+                f'<div style="background:#f7f7f7; border:1px solid #ddd; border-radius:6px; '
+                f'padding:10px; height:200px; overflow-y:auto; color:#1a1a1a; '
+                f'font-size:0.9rem; line-height:1.5; user-select:text;">'
+                f'{_html_notes}</div>',
+                unsafe_allow_html=True,
+            )
+
+        with col_new:
+            st.markdown("**New Note**")
+            st.text_area(
+                "New Note",
+                value=pending_new,
+                height=200,
+                placeholder="Type your new note here...",
+                key=f"notes_new_{row_idx}",
+                label_visibility="collapsed",
+            )
+
+
 # == Render the active panel (only one at a time) =============================
 
 if st.session_state.active_edit_row is not None:
@@ -585,6 +686,8 @@ if st.session_state.active_edit_row is not None:
     st.session_state[f"_panel_rendered_{st.session_state.active_edit_row}"] = True
 elif st.session_state.active_info_row is not None:
     render_info_panel(st.session_state.active_info_row)
+elif st.session_state.active_notes_row is not None:
+    render_notes_panel(st.session_state.active_notes_row)
 
 
 # == Change detection ==========================================================
