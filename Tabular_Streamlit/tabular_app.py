@@ -9,19 +9,15 @@ Run from the project root so .streamlit/secrets.toml is picked up:
 """
 
 import json
-import sys
 from datetime import datetime
-from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-
 from config import (
     EDITABLE_COLUMNS,
     READ_ONLY_COLUMNS,
+    KAM_COLUMNS,
     SENSITIVITY_TYPES,
     BLOCKER_TYPES,
     QUALIFICATION_OPTIONS,
@@ -31,7 +27,7 @@ from config import (
     COLUMN_PRESETS,
     get_column_config,
 )
-from db import fetch_view_data, fetch_firm_names, insert_changed_rows
+from db import fetch_view_data, fetch_firm_names, insert_changed_rows, upsert_prospect_kam
 
 # == Page config ===============================================================
 
@@ -421,7 +417,7 @@ for _cap_idx in edited_df.index:
     _cap_orig = st.session_state.original_df.loc[_cap_idx]
     _cap_edit = edited_df.loc[_cap_idx]
     _cap_row_edits = {}
-    for _cap_col in EDITABLE_COLUMNS:
+    for _cap_col in EDITABLE_COLUMNS + KAM_COLUMNS:
         _cap_orig_val = _normalise(_cap_orig[_cap_col])
         _cap_edit_val = _normalise(_cap_edit[_cap_col])
         if _cap_col in ("EUA_VOLUME", "GO_VOLUME"):
@@ -849,6 +845,74 @@ def detect_changes(
     return changed_rows
 
 
+def detect_kam_changes(
+    original: pd.DataFrame, edited: pd.DataFrame, inline_edits: dict,
+) -> list[dict]:
+    """
+    Detect KAM column edits (EEX_KAM, INCUBEX_KAM).
+    Returns a list of dicts ready for upsert_prospect_kam().
+    Only accepts changes where the ORIGINAL value was blank — prevents
+    users from overwriting KAMs that came from COMPANY_CODE.
+    """
+    kam_rows: list[dict] = []
+    checked_indices = set()
+
+    for idx in edited.index:
+        checked_indices.add(idx)
+        orig_row = original.loc[idx]
+        edit_row = edited.loc[idx]
+
+        # Only allow KAM edits for Prospects and Setting Up — not Clients
+        status = (orig_row.get("CLIENT_STATUS") or "").strip()
+        if status not in ("Prospect", "Setting up"):
+            continue
+
+        eex_orig = _normalise(orig_row.get("EEX_KAM"))
+        eex_edit = _normalise(edit_row.get("EEX_KAM"))
+        inx_orig = _normalise(orig_row.get("INCUBEX_KAM"))
+        inx_edit = _normalise(edit_row.get("INCUBEX_KAM"))
+
+        # Only accept edits where original was blank
+        eex_new = eex_edit if (eex_orig is None and eex_edit is not None) else None
+        inx_new = inx_edit if (inx_orig is None and inx_edit is not None) else None
+
+        if eex_new is not None or inx_new is not None:
+            kam_rows.append({
+                "company": edit_row["COMPANY"],
+                "client_type": edit_row["CLIENT_TYPE"],
+                "eex_kam": eex_new,
+                "incubex_kam": inx_new,
+            })
+
+    # Check inline_edits for filtered-out rows
+    for idx, ie in inline_edits.items():
+        if idx in checked_indices:
+            continue
+        orig_row = original.loc[idx]
+        status = (orig_row.get("CLIENT_STATUS") or "").strip()
+        if status not in ("Prospect", "Setting up"):
+            continue
+        eex_kam = None
+        incubex_kam = None
+        if "EEX_KAM" in ie:
+            eex_orig = _normalise(orig_row.get("EEX_KAM"))
+            if eex_orig is None and _normalise(ie["EEX_KAM"]) is not None:
+                eex_kam = _normalise(ie["EEX_KAM"])
+        if "INCUBEX_KAM" in ie:
+            inx_orig = _normalise(orig_row.get("INCUBEX_KAM"))
+            if inx_orig is None and _normalise(ie["INCUBEX_KAM"]) is not None:
+                incubex_kam = _normalise(ie["INCUBEX_KAM"])
+        if eex_kam is not None or incubex_kam is not None:
+            kam_rows.append({
+                "company": orig_row["COMPANY"],
+                "client_type": orig_row["CLIENT_TYPE"],
+                "eex_kam": eex_kam,
+                "incubex_kam": incubex_kam,
+            })
+
+    return kam_rows
+
+
 # == Buttons ===================================================================
 
 col_left, col_mid, col_right = st.columns([1, 2, 1])
@@ -869,8 +933,10 @@ if refresh_clicked:
 @st.dialog("Confirm Submission", width="large")
 def confirm_submit_dialog():
     """Modal popup showing a preview of changes before writing to Snowflake."""
-    changed = st.session_state.pending_changes
-    st.markdown(f"**{len(changed)} row(s) changed** — review before submitting:")
+    changed = st.session_state.pending_changes or []
+    kam_changed = st.session_state.get("pending_kam_changes", []) or []
+    total = len(changed) + len(kam_changed)
+    st.markdown(f"**{total} row(s) changed** — review before submitting:")
 
     skip_keys = {"company", "client_type", "overall_volume", "power_volume", "gas_volume"}
     preview_rows = []
@@ -885,25 +951,54 @@ def confirm_submit_dialog():
                 "Field": k.replace("_", " ").title(),
                 "New Value": display_val,
             })
+    # Add KAM changes to preview
+    for r in kam_changed:
+        if r.get("eex_kam") is not None:
+            preview_rows.append({
+                "Company": r["company"],
+                "Client Type": r["client_type"],
+                "Field": "EEX KAM",
+                "New Value": r["eex_kam"],
+            })
+        if r.get("incubex_kam") is not None:
+            preview_rows.append({
+                "Company": r["company"],
+                "Client Type": r["client_type"],
+                "Field": "Incubex KAM",
+                "New Value": r["incubex_kam"],
+            })
     preview = pd.DataFrame(preview_rows)
     st.dataframe(preview, use_container_width=True, hide_index=True)
 
     btn_accept, btn_cancel = st.columns(2)
     with btn_accept:
         if st.button("Accept", type="primary", use_container_width=True):
+            all_errors = []
+            total_success = 0
             with st.spinner("Submitting changes..."):
-                success_count, errors = insert_changed_rows(changed)
+                # Route CLIENTS changes
+                if changed:
+                    client_ok, client_errs = insert_changed_rows(changed)
+                    total_success += client_ok
+                    all_errors.extend(client_errs)
+                # Route KAM changes to PROSPECT_KAM
+                if kam_changed:
+                    kam_ok, kam_errs = upsert_prospect_kam(kam_changed)
+                    total_success += kam_ok
+                    all_errors.extend(kam_errs)
             st.session_state.submit_result = {
-                "success": success_count, "errors": errors,
+                "success": total_success, "errors": all_errors,
             }
             st.session_state.pending_changes = None
-            if success_count > 0:
+            st.session_state.pending_kam_changes = None
+            if total_success > 0:
                 fetch_view_data.clear()
                 st.session_state.force_reload = True
             st.rerun()
     with btn_cancel:
         if st.button("Continue Editing", use_container_width=True):
             st.session_state.pending_changes = None
+            st.session_state.pending_kam_changes = None
             st.rerun()
 
 
@@ -912,10 +1007,14 @@ if submit_clicked:
         st.session_state.original_df, edited_df,
         st.session_state.panel_edits, st.session_state.inline_edits,
     )
-    if not changed:
+    kam_changed = detect_kam_changes(
+        st.session_state.original_df, edited_df, st.session_state.inline_edits,
+    )
+    if not changed and not kam_changed:
         st.info("No changes detected.")
     else:
         st.session_state.pending_changes = changed
+        st.session_state.pending_kam_changes = kam_changed
         confirm_submit_dialog()
 
 # Show result messages after a successful dialog submission
