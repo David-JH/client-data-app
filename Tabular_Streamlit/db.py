@@ -72,6 +72,38 @@ def _json_to_display(raw: dict) -> str:
 
 
 @st.cache_data(ttl=300)
+def fetch_firm_names() -> tuple[list[str], list[str]]:
+    """
+    Fetch distinct broker and clearer names from ALL_FIRM_NAMES.
+    Returns (brokers, clearers) as sorted lists.
+    """
+    conn = get_snowflake_connection(schema="CLIENTS")
+    if conn is None:
+        return [], []
+
+    brokers = []
+    clearers = []
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT DISTINCT BROKER, CLEARER
+            FROM ALL_FIRM_NAMES
+            WHERE BROKER IS NOT NULL OR CLEARER IS NOT NULL
+        """)
+        for row in cursor.fetchall():
+            if row[0]:
+                brokers.append(row[0])
+            if row[1]:
+                clearers.append(row[1])
+    except Exception as e:
+        st.error(f"Error fetching firm names: {str(e)}")
+    finally:
+        conn.close()
+
+    return sorted(set(brokers)), sorted(set(clearers))
+
+
+@st.cache_data(ttl=300)
 def fetch_view_data() -> pd.DataFrame:
     """
     Fetch all client data from STREAMLIT_APP_VIEW.
