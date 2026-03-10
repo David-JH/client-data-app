@@ -71,7 +71,7 @@ def _json_to_display(raw: dict) -> str:
     return ", ".join(parts)
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=3600)
 def fetch_firm_names() -> tuple[list[str], list[str]]:
     """
     Fetch distinct broker and clearer names from ALL_FIRM_NAMES.
@@ -103,7 +103,7 @@ def fetch_firm_names() -> tuple[list[str], list[str]]:
     return sorted(set(brokers)), sorted(set(clearers))
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=600)
 def fetch_view_data() -> pd.DataFrame:
     """
     Fetch all client data from STREAMLIT_APP_VIEW.
@@ -139,6 +139,56 @@ def fetch_view_data() -> pd.DataFrame:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
     return df
+
+
+def upsert_prospect_kam(kam_rows: list[dict]) -> tuple[int, list[str]]:
+    """
+    Insert or update prospect KAM assignments in PROSPECT_KAM.
+
+    Parameters
+    ----------
+    kam_rows : list of dicts with keys: company, client_type, eex_kam, incubex_kam.
+
+    Returns
+    -------
+    (success_count, error_messages)
+    """
+    if not kam_rows:
+        return 0, []
+
+    conn = get_snowflake_connection()
+    if conn is None:
+        return 0, ["Could not connect to Snowflake."]
+
+    errors = []
+    success_count = 0
+    try:
+        cursor = conn.cursor()
+        for row in kam_rows:
+            try:
+                cursor.execute(
+                    """
+                    MERGE INTO PROSPECT_KAM AS tgt
+                    USING (SELECT %(company)s AS COMPANY, %(client_type)s AS CLIENT_TYPE) AS src
+                    ON tgt.COMPANY = src.COMPANY AND tgt.CLIENT_TYPE = src.CLIENT_TYPE
+                    WHEN MATCHED THEN UPDATE SET
+                        INCUBEX_KAM = COALESCE(%(incubex_kam)s, tgt.INCUBEX_KAM),
+                        EEX_KAM     = COALESCE(%(eex_kam)s, tgt.EEX_KAM)
+                    WHEN NOT MATCHED THEN INSERT (COMPANY, CLIENT_TYPE, INCUBEX_KAM, EEX_KAM)
+                        VALUES (%(company)s, %(client_type)s, %(incubex_kam)s, %(eex_kam)s)
+                    """,
+                    row,
+                )
+                success_count += 1
+            except Exception as e:
+                errors.append(f"KAM upsert failed for {row.get('company', '?')}: {e}")
+        conn.commit()
+        return success_count, errors
+    except Exception as e:
+        errors.append(f"KAM upsert failed: {e}")
+        return success_count, errors
+    finally:
+        conn.close()
 
 
 def insert_changed_rows(rows: list[dict]) -> tuple[int, list[str]]:
