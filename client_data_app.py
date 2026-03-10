@@ -11,13 +11,13 @@ import json
 
 # Impact level mappings: label <-> numeric value
 IMPACT_LABEL_TO_VALUE = {
-    "No Impact": 0.0,
-    "Frustration/Annoyance": 0.25,
-    "Tangible impact": 0.5,
-    "Major issue": 0.75,
-    "Complete dealbreaker": 1.0
+    "None": 0.0,
+    "Low": 0.25,
+    "Medium": 0.5,
+    "High": 0.75,
+    "Dealbreaker": 1.0,
 }
-IMPACT_VALUE_TO_LABEL = {v: k for k, v in IMPACT_LABEL_TO_VALUE.items()}
+IMPACT_VALUE_TO_LABEL = {v: k for k, v in reversed(list(IMPACT_LABEL_TO_VALUE.items()))}
 IMPACT_OPTIONS = list(IMPACT_LABEL_TO_VALUE.keys())
 
 # Page configuration
@@ -203,7 +203,7 @@ def parse_sensitivities_json(value) -> dict:
     """
     Parse sensitivities from JSON/VARIANT format.
     Converts numeric values to labels for display.
-    Returns dict like {'Margin': 'Major issue'}.
+    Returns dict like {'Margin': 'High'}.
     """
     if not value or pd.isna(value):
         return {}
@@ -247,11 +247,13 @@ def get_prefill_data(clients_df: pd.DataFrame, company: str, client_type: str) -
 
     row = matched.iloc[0]
     sensitivities_dict = parse_sensitivities_json(row['SENSITIVITIES'])
+    barriers_dict = parse_sensitivities_json(row['BARRIERS'])
     return {
         'client_status': row['CLIENT_STATUS'] if pd.notna(row['CLIENT_STATUS']) else None,
-        'sensitivities': list(sensitivities_dict.keys()),  # List of selected sensitivities
-        'sensitivities_impact': sensitivities_dict,  # Dict with impact levels
-        'barriers': parse_comma_string(row['BARRIERS']),
+        'sensitivities': list(sensitivities_dict.keys()),
+        'sensitivities_impact': sensitivities_dict,
+        'barriers': list(barriers_dict.keys()),
+        'barriers_impact': barriers_dict,
         'decision_makers': row['DECISION_MAKERS'] if pd.notna(row['DECISION_MAKERS']) else "",
         'eua_volume': int(float(row['EUA_VOLUME'])) if pd.notna(row['EUA_VOLUME']) else None,
         'go_volume': int(float(row['GO_VOLUME'])) if pd.notna(row['GO_VOLUME']) else None,
@@ -287,7 +289,7 @@ def insert_client_data(data: dict) -> bool:
             FRONT_END, FRONT_END_DETAILS, CLEARERS, BROKERS, ETRM, SOURCE, NOTES
         )
         SELECT
-            %(client_status)s, %(client_type)s, %(company)s, PARSE_JSON(%(sensitivities)s), %(barriers)s,
+            %(client_status)s, %(client_type)s, %(company)s, PARSE_JSON(%(sensitivities)s), PARSE_JSON(%(barriers)s),
             %(decision_makers)s, %(overall_volume)s, %(eua_volume)s, %(go_volume)s,
             %(power_volume)s, %(gas_volume)s, %(other_product_notes)s, %(access_type)s,
             %(front_end)s, %(front_end_details)s, %(clearers)s, %(brokers)s, %(etrm)s, %(source)s, %(notes)s
@@ -379,10 +381,15 @@ def main():
         st.session_state.go_volume_exact = None
         st.session_state.previous_selection = None
         # Reset sensitivities
-        for sens in ["Margin", "Fees", "Liquidity"]:
+        for sens in ["Margin", "Fees", "Liquidity", "Settlement"]:
             st.session_state[f"sens_{sens}"] = False
             if f"sens_impact_{sens}" in st.session_state:
                 del st.session_state[f"sens_impact_{sens}"]
+        # Reset barriers
+        for blk in ["Habit (e.g. ICE Default)", "Systems Setup (EEX)", "Systems Setup (Client or External)", "Compliance", "Risk", "Onboarding/KYC", "Execution speed"]:
+            st.session_state[f"blk_{blk}"] = False
+            if f"blk_impact_{blk}" in st.session_state:
+                del st.session_state[f"blk_impact_{blk}"]
         st.session_state.reset_company_fields = False
 
     # Show success message and balloons after rerun
@@ -446,10 +453,17 @@ def main():
             # Update sensitivities checkboxes and impact dropdowns
             prefill_sens = prefill.get('sensitivities', [])
             prefill_impact = prefill.get('sensitivities_impact', {})
-            for sens in ["Margin", "Fees", "Liquidity"]:
+            for sens in ["Margin", "Fees", "Liquidity", "Settlement"]:
                 st.session_state[f"sens_{sens}"] = sens in prefill_sens
                 if sens in prefill_impact:
                     st.session_state[f"sens_impact_{sens}"] = prefill_impact[sens]
+            # Update barriers checkboxes and impact dropdowns
+            prefill_blk = prefill.get('barriers', [])
+            prefill_blk_impact = prefill.get('barriers_impact', {})
+            for blk in ["Habit (e.g. ICE Default)", "Systems Setup (EEX)", "Systems Setup (Client or External)", "Compliance", "Risk", "Onboarding/KYC", "Execution speed"]:
+                st.session_state[f"blk_{blk}"] = blk in prefill_blk
+                if blk in prefill_blk_impact:
+                    st.session_state[f"blk_impact_{blk}"] = prefill_blk_impact[blk]
         else:
             # Clear if no prefill data for new selection
             st.session_state.clearers = []
@@ -457,10 +471,15 @@ def main():
             st.session_state.go_volume_range = None
             st.session_state.go_volume_exact = None
             # Clear sensitivities
-            for sens in ["Margin", "Fees", "Liquidity"]:
+            for sens in ["Margin", "Fees", "Liquidity", "Settlement"]:
                 st.session_state[f"sens_{sens}"] = False
                 if f"sens_impact_{sens}" in st.session_state:
                     del st.session_state[f"sens_impact_{sens}"]
+            # Clear barriers
+            for blk in ["Habit (e.g. ICE Default)", "Systems Setup (EEX)", "Systems Setup (Client or External)", "Compliance", "Risk", "Onboarding/KYC", "Execution speed"]:
+                st.session_state[f"blk_{blk}"] = False
+                if f"blk_impact_{blk}" in st.session_state:
+                    del st.session_state[f"blk_impact_{blk}"]
 
     # Clearers and Brokers outside form for dynamic checkbox behavior
     st.markdown('<p class="sub-header">Service Providers</p>', unsafe_allow_html=True)
@@ -517,11 +536,11 @@ def main():
     # Sensitivities section - outside form for dynamic behavior
     st.markdown('<p class="sub-header">Trading Information</p>', unsafe_allow_html=True)
 
-    sensitivities_options = ["Margin", "Fees", "Liquidity"]
+    sensitivities_options = ["Margin", "Fees", "Liquidity", "Settlement"]
 
     with st.container(border=True):
         st.markdown("**Sensitivities**")
-        st.caption("Key issues that direct flow - select impact level for each")
+        st.caption("Key issues that direct flow - select qualification level for each")
 
         sensitivities_with_impact = {}
         for sens in sensitivities_options:
@@ -544,6 +563,40 @@ def main():
                     )
                     sensitivities_with_impact[sens] = impact
 
+    # Barriers section - outside form for dynamic behavior (matches sensitivities pattern)
+    barriers_options = [
+        "Habit (e.g. ICE Default)",
+        "Systems Setup (EEX)",
+        "Systems Setup (Client or External)",
+        "Compliance",
+        "Risk",
+        "Onboarding/KYC",
+        "Execution speed",
+    ]
+
+    with st.container(border=True):
+        st.markdown("**Barriers**")
+        st.caption("Barriers to trading - select qualification level for each")
+
+        barriers_with_impact = {}
+        for blk in barriers_options:
+            blk_col1, blk_col2 = st.columns([1, 2])
+            with blk_col1:
+                if f"blk_{blk}" not in st.session_state:
+                    st.session_state[f"blk_{blk}"] = False
+                blk_selected = st.checkbox(blk, key=f"blk_{blk}")
+            with blk_col2:
+                if blk_selected:
+                    if f"blk_impact_{blk}" not in st.session_state:
+                        st.session_state[f"blk_impact_{blk}"] = IMPACT_OPTIONS[0]
+                    blk_impact = st.selectbox(
+                        f"{blk} impact",
+                        options=IMPACT_OPTIONS,
+                        key=f"blk_impact_{blk}",
+                        label_visibility="collapsed"
+                    )
+                    barriers_with_impact[blk] = blk_impact
+
     # Create form
     with st.form("client_form", clear_on_submit=True):
 
@@ -558,25 +611,6 @@ def main():
             index=status_index,
             placeholder="Select status...",
             help="Current status of the client"
-        )
-
-        # Barriers
-        barriers_options = [
-            "ICE Default",
-            "Fees",
-            "Margin",
-            "Liquidity",
-            "IT Setup (us)",
-            "IT Setup (them)",
-            "Compliance",
-            "Risk",
-            "Onboarding/KYC"
-        ]
-        barriers = st.multiselect(
-            "Barriers",
-            options=barriers_options,
-            default=[b for b in prefill.get('barriers', []) if b in barriers_options],
-            help="Barriers to trading (select multiple)"
         )
 
         # Decision Makers - with prefill
@@ -792,7 +826,14 @@ def main():
                 }
                 sensitivities_json = json.dumps(sensitivities_numeric) if sensitivities_numeric else None
                 sensitivities = list(sensitivities_with_impact.keys())  # For has_changed comparison
-                barriers_str = ", ".join(barriers) if barriers else None
+
+                # Convert barriers with impact levels to JSON string for VARIANT column
+                barriers_numeric = {
+                    blk: IMPACT_LABEL_TO_VALUE.get(label, 0.0)
+                    for blk, label in barriers_with_impact.items()
+                }
+                barriers_json = json.dumps(barriers_numeric) if barriers_numeric else None
+                barriers = list(barriers_with_impact.keys())  # For has_changed comparison
 
                 # Helper function to check if a value has changed from prefill
                 def has_changed(field_name, new_value, is_list=False):
@@ -820,7 +861,7 @@ def main():
                     'client_type': client_type,  # Always save
                     'company': company,  # Always save
                     'sensitivities': sensitivities_json if has_changed('sensitivities', sensitivities, is_list=True) else None,
-                    'barriers': barriers_str if has_changed('barriers', barriers, is_list=True) else None,
+                    'barriers': barriers_json if has_changed('barriers', barriers, is_list=True) else None,
                     'decision_makers': (decision_makers if decision_makers else None) if has_changed('decision_makers', decision_makers) else None,
                     'overall_volume': None,
                     'eua_volume': eua_volume if has_changed('eua_volume', eua_volume) else None,
