@@ -76,7 +76,7 @@ COLUMN_PRESETS = {
     "All": None,  # None = show all columns
     "Meeting Notes": [
         "COMPANY", "CLIENT_TYPE", "CLIENT_STATUS", "EEX_KAM", "INCUBEX_KAM",
-        "DECISION_MAKERS", "SOURCE", "NOTES", "ENTRY_DATE",
+        "DECISION_MAKERS", "SOURCE", "NOTES", "NOTES_EDIT", "ENTRY_DATE",
     ],
     "Sensitivities & Blockers": [
         "COMPANY", "CLIENT_TYPE", "CLIENT_STATUS",
@@ -139,15 +139,23 @@ INSERT_QUERY = """
 
 # ── Data editor column config ────────────────────────────────────────────────
 
-def get_column_config():
+def get_column_config(broker_options=None, clearer_options=None):
     """Return the st.data_editor column_config dict.
 
     Fixed widths prevent columns from resizing when Sensitivities / Blockers
     display strings change during panel edits.
+
+    Parameters
+    ----------
+    broker_options : list[str] | None
+        Dropdown options for the Brokers column.
+    clearer_options : list[str] | None
+        Dropdown options for the Clearers column.
     """
     return {
         "EDIT": st.column_config.CheckboxColumn("Edit S/B", default=False, width=70),
         "INFO": st.column_config.CheckboxColumn("Last Update Dates", default=False, width=120),
+        "NOTES_EDIT": st.column_config.CheckboxColumn("Edit Notes", default=False, width=85),
         "COMPANY": st.column_config.TextColumn("Company", width=160),
         "CLIENT_TYPE": st.column_config.TextColumn("Client Type", width=80),
         "ENTRY_DATE": st.column_config.DateColumn("Entry Date", width=110),
@@ -173,8 +181,18 @@ def get_column_config():
         ),
         "FRONT_END": st.column_config.TextColumn("Front End", width=95),
         "FRONT_END_DETAILS": st.column_config.TextColumn("Front End Details", width=140),
-        "CLEARERS": st.column_config.TextColumn("Clearers", width=120),
-        "BROKERS": st.column_config.TextColumn("Brokers", width=120),
+        "CLEARERS": st.column_config.SelectboxColumn(
+            "Clearers",
+            options=clearer_options or [],
+            required=False,
+            width=120,
+        ),
+        "BROKERS": st.column_config.SelectboxColumn(
+            "Brokers",
+            options=broker_options or [],
+            required=False,
+            width=120,
+        ),
         "ETRM": st.column_config.SelectboxColumn(
             "ETRM",
             options=[
