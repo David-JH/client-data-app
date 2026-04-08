@@ -381,7 +381,7 @@ def main():
         st.session_state.go_volume_exact = None
         st.session_state.previous_selection = None
         # Reset sensitivities
-        for sens in ["Margin", "Fees", "Liquidity", "Settlement"]:
+        for sens in ["Margin", "Fees", "Friction", "Liquidity (Orderbook)", "Liquidity (OI)", "Settlement"]:
             st.session_state[f"sens_{sens}"] = False
             if f"sens_impact_{sens}" in st.session_state:
                 del st.session_state[f"sens_impact_{sens}"]
@@ -453,7 +453,7 @@ def main():
             # Update sensitivities checkboxes and impact dropdowns
             prefill_sens = prefill.get('sensitivities', [])
             prefill_impact = prefill.get('sensitivities_impact', {})
-            for sens in ["Margin", "Fees", "Liquidity", "Settlement"]:
+            for sens in ["Margin", "Fees", "Friction", "Liquidity (Orderbook)", "Liquidity (OI)", "Settlement"]:
                 st.session_state[f"sens_{sens}"] = sens in prefill_sens
                 if sens in prefill_impact:
                     st.session_state[f"sens_impact_{sens}"] = prefill_impact[sens]
@@ -471,7 +471,7 @@ def main():
             st.session_state.go_volume_range = None
             st.session_state.go_volume_exact = None
             # Clear sensitivities
-            for sens in ["Margin", "Fees", "Liquidity", "Settlement"]:
+            for sens in ["Margin", "Fees", "Friction", "Liquidity (Orderbook)", "Liquidity (OI)", "Settlement"]:
                 st.session_state[f"sens_{sens}"] = False
                 if f"sens_impact_{sens}" in st.session_state:
                     del st.session_state[f"sens_impact_{sens}"]
@@ -536,7 +536,7 @@ def main():
     # Sensitivities section - outside form for dynamic behavior
     st.markdown('<p class="sub-header">Trading Information</p>', unsafe_allow_html=True)
 
-    sensitivities_options = ["Margin", "Fees", "Liquidity", "Settlement"]
+    sensitivities_options = ["Margin", "Fees", "Friction", "Liquidity (Orderbook)", "Liquidity (OI)", "Settlement"]
 
     with st.container(border=True):
         st.markdown("**Sensitivities**")
