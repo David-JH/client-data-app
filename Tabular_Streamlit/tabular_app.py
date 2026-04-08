@@ -867,7 +867,7 @@ def editor_fragment():
     cur_preset_columns = COLUMN_PRESETS.get(sel_preset or "All")
 
     # -- Styled DataFrame ------------------------------------------------------
-    styled_df = display_df.style.applymap(
+    styled_df = display_df.style.map(
         highlight_entry_date, subset=["ENTRY_DATE"]
     )
 
