@@ -20,7 +20,7 @@ VALUE_TO_QUALIFICATION = {v: k for k, v in reversed(list(QUALIFICATION_TO_VALUE.
 
 # ── Sensitivity and Blocker types ────────────────────────────────────────────
 
-SENSITIVITY_TYPES = ["Fees", "Friction", "Liquidity", "Margin", "Settlement"]
+SENSITIVITY_TYPES = ["Fees", "Friction", "Liquidity (Orderbook)", "Liquidity (OI)", "Margin", "Settlement"]
 
 BLOCKER_TYPES = [
     "Habit (e.g. ICE Default)",
