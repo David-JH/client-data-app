@@ -173,178 +173,6 @@ def _normalise(value):
     return value
 
 
-# == Load data =================================================================
-
-df = fetch_view_data()
-broker_list, clearer_list = fetch_firm_names()
-
-if df.empty:
-    st.warning("No data returned from STREAMLIT_APP_VIEW2.")
-    st.stop()
-
-# Extend dropdown lists with any values already in the data but missing from master list
-existing_brokers = df["BROKERS"].dropna().unique().tolist()
-existing_clearers = df["CLEARERS"].dropna().unique().tolist()
-broker_list = sorted(set(broker_list) | set(b for b in existing_brokers if b))
-clearer_list = sorted(set(clearer_list) | set(c for c in existing_clearers if c))
-
-# Initialise session state on first load or after explicit refresh.
-if "original_df" not in st.session_state or st.session_state.get("force_reload"):
-    st.session_state.original_df = df.copy(deep=True)
-    st.session_state.working_df = df.copy(deep=True)
-    st.session_state.active_edit_row = None
-    st.session_state.active_info_row = None
-    st.session_state.active_notes_row = None
-    st.session_state.panel_edits = {}  # {row_idx: {"sensitivities": {...}, "barriers": {...}}}
-    st.session_state.inline_edits = {}  # {row_idx: {col: value}} — survives filter changes
-    st.session_state.pending_changes = None
-    st.session_state.submit_result = None
-    st.session_state.force_reload = False
-
-# Ensure keys exist for sessions that started before these features were added.
-if "inline_edits" not in st.session_state:
-    st.session_state.inline_edits = {}
-if "active_notes_row" not in st.session_state:
-    st.session_state.active_notes_row = None
-
-
-# == Collect panel edits FIRST (before building display) =======================
-# Streamlit updates st.session_state widget values at the START of each rerun,
-# so we can read the current panel state here, before the data_editor renders.
-# This fixes the "one step behind" display lag.
-
-if st.session_state.active_edit_row is not None:
-    active = st.session_state.active_edit_row
-    # Only collect widget state if the panel was already rendered on a previous
-    # rerun (i.e. the widgets exist).  On the first open, the flag won't be set
-    # yet so we skip — this prevents overwriting the original raw data with
-    # empty values from non-existent widgets.
-    if st.session_state.get(f"_panel_rendered_{active}", False):
-        st.session_state.panel_edits[active] = collect_panel_edits(active)
-
-
-# == Collect notes panel edit FIRST =============================================
-# Read the "new note" text_area at the start of each rerun.
-# A non-empty new note is stored into inline_edits so it survives filter
-# changes and gets picked up by detect_changes on submit.
-
-if st.session_state.active_notes_row is not None:
-    _notes_idx = st.session_state.active_notes_row
-    _notes_key = f"notes_new_{_notes_idx}"
-    if _notes_key in st.session_state:
-        _new_note = (st.session_state[_notes_key] or "").strip()
-        if _new_note:
-            if _notes_idx not in st.session_state.inline_edits:
-                st.session_state.inline_edits[_notes_idx] = {}
-            st.session_state.inline_edits[_notes_idx]["NOTES"] = _new_note
-        else:
-            # User cleared the new-note box — remove NOTES from inline_edits
-            if _notes_idx in st.session_state.inline_edits:
-                st.session_state.inline_edits[_notes_idx].pop("NOTES", None)
-                if not st.session_state.inline_edits[_notes_idx]:
-                    del st.session_state.inline_edits[_notes_idx]
-
-
-# == Apply live preview: update display strings from accumulated panel edits ===
-
-working = st.session_state.working_df
-
-for idx, pe in st.session_state.panel_edits.items():
-    if idx < len(working):
-        sens_labels = _panel_edit_to_labels(pe, "sensitivities")
-        block_labels = _panel_edit_to_labels(pe, "barriers")
-        working.at[idx, "SENSITIVITIES"] = _labels_to_display(sens_labels)
-        working.at[idx, "BARRIERS"] = _labels_to_display(block_labels)
-
-# Apply stored inline edits so they survive filter changes in the data editor.
-# When the user switches filter, st.data_editor resets its widget state.
-# By writing the edits into working_df, the data_editor input data already
-# contains the correct values, so they appear in the grid and flow through
-# to edited_df on the next rerun.
-for idx, col_edits in st.session_state.inline_edits.items():
-    if idx < len(working):
-        for col, val in col_edits.items():
-            working.at[idx, col] = val
-
-# Add EDIT and INFO checkbox columns -- tick the active rows
-working_with_edit = working.copy()
-working_with_edit.insert(0, "EDIT", False)
-working_with_edit.insert(1, "INFO", False)
-active_row = st.session_state.active_edit_row
-if active_row is not None and active_row < len(working_with_edit):
-    working_with_edit.at[active_row, "EDIT"] = True
-active_info = st.session_state.active_info_row
-if active_info is not None and active_info < len(working_with_edit):
-    working_with_edit.at[active_info, "INFO"] = True
-
-# NOTES_EDIT checkbox — only meaningful in "Meeting Notes" preset but always
-# present in the DataFrame so column_order can reference it.
-working_with_edit["NOTES_EDIT"] = False
-active_notes = st.session_state.active_notes_row
-if active_notes is not None and active_notes < len(working_with_edit):
-    working_with_edit.at[active_notes, "NOTES_EDIT"] = True
-
-
-# == Search ====================================================================
-
-search_col1, search_col2 = st.columns([1, 1])
-
-with search_col1:
-    company_options = ["All"] + sorted(working_with_edit["COMPANY"].dropna().unique().tolist())
-    selected_company = st.selectbox(
-        "Search company",
-        options=company_options,
-        index=0,
-        key="company_search",
-    )
-
-with search_col2:
-    # Combine unique KAM values from both columns (defensive if columns missing from stale cache)
-    has_kam_cols = "EEX_KAM" in working_with_edit.columns and "INCUBEX_KAM" in working_with_edit.columns
-    if has_kam_cols:
-        eex_kams = working_with_edit["EEX_KAM"].dropna().unique().tolist()
-        incubex_kams = working_with_edit["INCUBEX_KAM"].dropna().unique().tolist()
-        all_kams = sorted(set(eex_kams + incubex_kams))
-    else:
-        all_kams = []
-    kam_options = ["All"] + all_kams
-    selected_kam = st.selectbox(
-        "Search KAM",
-        options=kam_options,
-        index=0,
-        key="kam_search",
-    )
-
-# Apply filters (AND logic when both are set)
-display_df = working_with_edit
-
-if selected_company != "All":
-    display_df = display_df[display_df["COMPANY"] == selected_company]
-
-if selected_kam != "All" and has_kam_cols:
-    kam_mask = (display_df["EEX_KAM"] == selected_kam) | (display_df["INCUBEX_KAM"] == selected_kam)
-    display_df = display_df[kam_mask]
-
-
-# == Column preset filter =====================================================
-
-selected_preset = st.segmented_control(
-    "Column Filters:",
-    options=list(COLUMN_PRESETS.keys()),
-    default="All",
-    key="column_preset",
-)
-
-# Clear panels if the selected preset hides their trigger columns
-preset_columns = COLUMN_PRESETS.get(selected_preset or "All")
-if preset_columns is not None and "EDIT" not in preset_columns:
-    if st.session_state.get("active_edit_row") is not None:
-        st.session_state.active_edit_row = None
-if preset_columns is not None and "NOTES_EDIT" not in preset_columns:
-    if st.session_state.get("active_notes_row") is not None:
-        st.session_state.active_notes_row = None
-
-
 # == Date-based colour coding ==================================================
 
 def highlight_entry_date(val):
@@ -364,141 +192,7 @@ def highlight_entry_date(val):
         return "background-color: #FFB6C6"
 
 
-styled_df = display_df.style.applymap(highlight_entry_date, subset=["ENTRY_DATE"])
-
-
-# == Data editor ===============================================================
-
-# Build full column order, including KAM columns only when present in the data
-_col_order_prefix = ["COMPANY", "CLIENT_TYPE", "CLIENT_STATUS"]
-if has_kam_cols:
-    _col_order_prefix += ["EEX_KAM", "INCUBEX_KAM"]
-
-_full_col_order = _col_order_prefix + [
-    "SENSITIVITIES", "BARRIERS", "EDIT",
-    "DECISION_MAKERS", "EUA_VOLUME", "GO_VOLUME",
-    "OTHER_PRODUCT_NOTES", "ACCESS_TYPE", "FRONT_END", "FRONT_END_DETAILS",
-    "CLEARERS", "BROKERS", "ETRM", "SOURCE", "NOTES", "NOTES_EDIT", "ENTRY_DATE",
-    "INFO",  # Always far right
-]
-
-# Apply column preset filter
-if preset_columns is None:
-    # "All" preset — show everything
-    _col_order = _full_col_order
-else:
-    # Filter to only the columns in the preset, preserving preset order
-    _col_order = [c for c in preset_columns if c in _full_col_order]
-    # Always append INFO (Last Update Dates) at the end
-    if "INFO" not in _col_order:
-        _col_order.append("INFO")
-
-edited_df = st.data_editor(
-    styled_df,
-    column_config=get_column_config(broker_options=broker_list, clearer_options=clearer_list),
-    column_order=_col_order,
-    use_container_width=True,
-    hide_index=True,
-    num_rows="fixed",
-    disabled=READ_ONLY_COLUMNS,
-    key="client_data_editor",
-)
-
-
-# == Capture inline edits =====================================================
-# After every rerun, compare visible rows in edited_df against original_df.
-# Any differences are stored in session state so they survive when the user
-# changes the search filter (which resets the data_editor widget state).
-# Because inline_edits are applied to working_df *before* the editor renders,
-# previously-stored edits flow through as input data and reappear here even
-# after a widget reset — preserving them until the user reverts or submits.
-
-for _cap_idx in edited_df.index:
-    _cap_orig = st.session_state.original_df.loc[_cap_idx]
-    _cap_edit = edited_df.loc[_cap_idx]
-    _cap_row_edits = {}
-    for _cap_col in EDITABLE_COLUMNS + KAM_COLUMNS:
-        _cap_orig_val = _normalise(_cap_orig[_cap_col])
-        _cap_edit_val = _normalise(_cap_edit[_cap_col])
-        if _cap_col in ("EUA_VOLUME", "GO_VOLUME"):
-            _cap_orig_num = None if _cap_orig_val is None else float(_cap_orig_val)
-            _cap_edit_num = None if _cap_edit_val is None else float(_cap_edit_val)
-            if _cap_orig_num != _cap_edit_num:
-                _cap_row_edits[_cap_col] = _cap_edit[_cap_col]
-        else:
-            if _cap_orig_val != _cap_edit_val:
-                _cap_row_edits[_cap_col] = _cap_edit[_cap_col]
-    if _cap_row_edits:
-        st.session_state.inline_edits[_cap_idx] = _cap_row_edits
-    elif _cap_idx in st.session_state.inline_edits:
-        # User reverted all changes for this row — remove it
-        del st.session_state.inline_edits[_cap_idx]
-
-
-# == Panel enforcement (one panel at a time: Edit, Info, or Notes) =============
-
-def _resolve_checkbox(col_name, prev_active_key):
-    """Resolve a checkbox column, ensuring only one row is active.
-
-    Returns the new active row index (or None).
-    """
-    if col_name not in edited_df.columns:
-        return st.session_state.get(prev_active_key)
-    ticked = edited_df.index[edited_df[col_name] == True].tolist()
-    prev = st.session_state[prev_active_key]
-
-    if ticked:
-        if prev is not None and prev in ticked:
-            others = [i for i in ticked if i != prev]
-            new_active = others[0] if others else prev
-        else:
-            new_active = ticked[0]
-        return new_active
-    else:
-        return None
-
-
-new_edit = _resolve_checkbox("EDIT", "active_edit_row")
-new_info = _resolve_checkbox("INFO", "active_info_row")
-new_notes = _resolve_checkbox("NOTES_EDIT", "active_notes_row")
-
-needs_rerun = False
-
-# -- Edit column changed
-if new_edit != st.session_state.active_edit_row:
-    old_edit = st.session_state.active_edit_row
-    if old_edit is not None:
-        st.session_state.pop(f"_panel_rendered_{old_edit}", None)
-    st.session_state.active_edit_row = new_edit
-    if new_edit is not None:
-        # Close other panels when edit panel opens
-        st.session_state.active_info_row = None
-        st.session_state.active_notes_row = None
-    needs_rerun = True
-
-# -- Info column changed
-if new_info != st.session_state.active_info_row:
-    st.session_state.active_info_row = new_info
-    if new_info is not None:
-        # Close other panels when info panel opens
-        st.session_state.active_edit_row = None
-        st.session_state.active_notes_row = None
-    needs_rerun = True
-
-# -- Notes Edit column changed
-if new_notes != st.session_state.active_notes_row:
-    st.session_state.active_notes_row = new_notes
-    if new_notes is not None:
-        # Close other panels when notes panel opens
-        st.session_state.active_edit_row = None
-        st.session_state.active_info_row = None
-    needs_rerun = True
-
-if needs_rerun:
-    st.rerun()
-
-
-# == Edit panel for Sensitivities & Blockers ===================================
+# == Panel rendering functions =================================================
 
 def render_edit_panel(row_idx: int):
     """Render the Sensitivities + Blockers edit panel for one row."""
@@ -588,8 +282,6 @@ def render_edit_panel(row_idx: int):
                         )
 
 
-# == Info panel — per-field last-updated dates =================================
-
 def render_info_panel(row_idx: int):
     """Show when each field was last updated for a given row.
 
@@ -631,8 +323,6 @@ def render_info_panel(row_idx: int):
             with target:
                 st.markdown(f"**{label}:** {date_str}")
 
-
-# == Notes edit panel ==========================================================
 
 def render_notes_panel(row_idx: int):
     """Render a two-box notes panel: read-only existing notes + empty new note."""
@@ -677,18 +367,6 @@ def render_notes_panel(row_idx: int):
                 key=f"notes_new_{row_idx}",
                 label_visibility="collapsed",
             )
-
-
-# == Render the active panel (only one at a time) =============================
-
-if st.session_state.active_edit_row is not None:
-    render_edit_panel(st.session_state.active_edit_row)
-    # Mark that widgets now exist so collect_panel_edits runs on the next rerun
-    st.session_state[f"_panel_rendered_{st.session_state.active_edit_row}"] = True
-elif st.session_state.active_info_row is not None:
-    render_info_panel(st.session_state.active_info_row)
-elif st.session_state.active_notes_row is not None:
-    render_notes_panel(st.session_state.active_notes_row)
 
 
 # == Change detection ==========================================================
@@ -853,6 +531,7 @@ def detect_kam_changes(
     Returns a list of dicts ready for upsert_prospect_kam().
     Only accepts changes where the ORIGINAL value was blank — prevents
     users from overwriting KAMs that came from COMPANY_CODE.
+    Only accepts changes for Prospects and Setting Up — not Clients.
     """
     kam_rows: list[dict] = []
     checked_indices = set()
@@ -913,20 +592,28 @@ def detect_kam_changes(
     return kam_rows
 
 
-# == Buttons ===================================================================
+# == Panel enforcement helper ==================================================
 
-col_left, col_mid, col_right = st.columns([1, 2, 1])
+def _resolve_checkbox(edited_df, col_name, prev_active_key):
+    """Resolve a checkbox column, ensuring only one row is active.
 
-with col_mid:
-    submit_clicked = st.button("Submit Changes", type="primary", use_container_width=True)
+    Returns the new active row index (or None).
+    """
+    if col_name not in edited_df.columns:
+        return st.session_state.get(prev_active_key)
+    ticked = edited_df.index[edited_df[col_name] == True].tolist()
+    prev = st.session_state[prev_active_key]
 
-with col_right:
-    refresh_clicked = st.button("Refresh Data", use_container_width=True)
+    if ticked:
+        if prev is not None and prev in ticked:
+            others = [i for i in ticked if i != prev]
+            new_active = others[0] if others else prev
+        else:
+            new_active = ticked[0]
+        return new_active
+    else:
+        return None
 
-if refresh_clicked:
-    fetch_view_data.clear()
-    st.session_state.force_reload = True
-    st.rerun()
 
 # == Confirmation dialog =======================================================
 
@@ -1002,27 +689,335 @@ def confirm_submit_dialog():
             st.rerun()
 
 
-if submit_clicked:
-    changed = detect_changes(
-        st.session_state.original_df, edited_df,
-        st.session_state.panel_edits, st.session_state.inline_edits,
-    )
-    kam_changed = detect_kam_changes(
-        st.session_state.original_df, edited_df, st.session_state.inline_edits,
-    )
-    if not changed and not kam_changed:
-        st.info("No changes detected.")
-    else:
-        st.session_state.pending_changes = changed
-        st.session_state.pending_kam_changes = kam_changed
-        confirm_submit_dialog()
+# == Load data =================================================================
 
-# Show result messages after a successful dialog submission
-if st.session_state.get("submit_result"):
-    result = st.session_state.pop("submit_result")
-    if result["errors"]:
-        for err in result["errors"]:
-            st.error(err)
-    if result["success"] > 0:
-        st.success(f"Successfully submitted {result['success']} row(s).")
-        st.balloons()
+df = fetch_view_data()
+broker_list, clearer_list = fetch_firm_names()
+
+if df.empty:
+    st.warning("No data returned from STREAMLIT_APP_VIEW2.")
+    st.stop()
+
+# Extend dropdown lists with any values already in the data but missing from master list
+existing_brokers = df["BROKERS"].dropna().unique().tolist()
+existing_clearers = df["CLEARERS"].dropna().unique().tolist()
+broker_list = sorted(set(broker_list) | set(b for b in existing_brokers if b))
+clearer_list = sorted(set(clearer_list) | set(c for c in existing_clearers if c))
+
+# Initialise session state on first load or after explicit refresh.
+if "original_df" not in st.session_state or st.session_state.get("force_reload"):
+    st.session_state.original_df = df.copy(deep=True)
+    st.session_state.working_df = df.copy(deep=True)
+    st.session_state.active_edit_row = None
+    st.session_state.active_info_row = None
+    st.session_state.active_notes_row = None
+    st.session_state.panel_edits = {}  # {row_idx: {"sensitivities": {...}, "barriers": {...}}}
+    st.session_state.inline_edits = {}  # {row_idx: {col: value}} — survives filter changes
+    st.session_state.pending_changes = None
+    st.session_state.submit_result = None
+    st.session_state.force_reload = False
+
+# Ensure keys exist for sessions that started before these features were added.
+if "inline_edits" not in st.session_state:
+    st.session_state.inline_edits = {}
+if "active_notes_row" not in st.session_state:
+    st.session_state.active_notes_row = None
+
+
+# == Search ====================================================================
+
+search_col1, search_col2 = st.columns([1, 1])
+
+with search_col1:
+    _search_df = st.session_state.working_df
+    company_options = ["All"] + sorted(_search_df["COMPANY"].dropna().unique().tolist())
+    selected_company = st.selectbox(
+        "Search company",
+        options=company_options,
+        index=0,
+        key="company_search",
+    )
+
+with search_col2:
+    _search_df = st.session_state.working_df
+    _has_kam_cols = "EEX_KAM" in _search_df.columns and "INCUBEX_KAM" in _search_df.columns
+    if _has_kam_cols:
+        eex_kams = _search_df["EEX_KAM"].dropna().unique().tolist()
+        incubex_kams = _search_df["INCUBEX_KAM"].dropna().unique().tolist()
+        all_kams = sorted(set(eex_kams + incubex_kams))
+    else:
+        all_kams = []
+    kam_options = ["All"] + all_kams
+    selected_kam = st.selectbox(
+        "Search KAM",
+        options=kam_options,
+        index=0,
+        key="kam_search",
+    )
+
+
+# == Column preset filter =====================================================
+
+selected_preset = st.segmented_control(
+    "Column Filters:",
+    options=list(COLUMN_PRESETS.keys()),
+    default="All",
+    key="column_preset",
+)
+
+# Clear panels if the selected preset hides their trigger columns
+preset_columns = COLUMN_PRESETS.get(selected_preset or "All")
+if preset_columns is not None and "EDIT" not in preset_columns:
+    if st.session_state.get("active_edit_row") is not None:
+        st.session_state.active_edit_row = None
+if preset_columns is not None and "NOTES_EDIT" not in preset_columns:
+    if st.session_state.get("active_notes_row") is not None:
+        st.session_state.active_notes_row = None
+
+
+# == Editor fragment ===========================================================
+# Wrapping the data editor and everything below it in st.fragment means that
+# cell edits, checkbox toggles, and panel interactions only rerun THIS section
+# — not the entire page.  This preserves the data-editor's sort order and
+# scroll position when the user edits a cell.
+
+@st.fragment
+def editor_fragment():
+
+    # -- Collect panel edits FIRST (before building display) -------------------
+    # Streamlit updates st.session_state widget values at the START of each
+    # rerun, so we can read the current panel state here, before the
+    # data_editor renders.  This fixes the "one step behind" display lag.
+
+    if st.session_state.active_edit_row is not None:
+        active = st.session_state.active_edit_row
+        # Only collect widget state if the panel was already rendered on a
+        # previous rerun (i.e. the widgets exist).
+        if st.session_state.get(f"_panel_rendered_{active}", False):
+            st.session_state.panel_edits[active] = collect_panel_edits(active)
+
+    # -- Collect notes panel edit ----------------------------------------------
+    if st.session_state.active_notes_row is not None:
+        _notes_idx = st.session_state.active_notes_row
+        _notes_key = f"notes_new_{_notes_idx}"
+        if _notes_key in st.session_state:
+            _new_note = (st.session_state[_notes_key] or "").strip()
+            if _new_note:
+                if _notes_idx not in st.session_state.inline_edits:
+                    st.session_state.inline_edits[_notes_idx] = {}
+                st.session_state.inline_edits[_notes_idx]["NOTES"] = _new_note
+            else:
+                # User cleared the new-note box — remove NOTES from inline_edits
+                if _notes_idx in st.session_state.inline_edits:
+                    st.session_state.inline_edits[_notes_idx].pop("NOTES", None)
+                    if not st.session_state.inline_edits[_notes_idx]:
+                        del st.session_state.inline_edits[_notes_idx]
+
+    # -- Apply live preview: update display strings from panel & inline edits --
+    working = st.session_state.working_df
+
+    for idx, pe in st.session_state.panel_edits.items():
+        if idx < len(working):
+            sens_labels = _panel_edit_to_labels(pe, "sensitivities")
+            block_labels = _panel_edit_to_labels(pe, "barriers")
+            working.at[idx, "SENSITIVITIES"] = _labels_to_display(sens_labels)
+            working.at[idx, "BARRIERS"] = _labels_to_display(block_labels)
+
+    for idx, col_edits in st.session_state.inline_edits.items():
+        if idx < len(working):
+            for col, val in col_edits.items():
+                working.at[idx, col] = val
+
+    # -- Build working_with_edit -----------------------------------------------
+    working_with_edit = working.copy()
+    working_with_edit.insert(0, "EDIT", False)
+    working_with_edit.insert(1, "INFO", False)
+    active_row = st.session_state.active_edit_row
+    if active_row is not None and active_row < len(working_with_edit):
+        working_with_edit.at[active_row, "EDIT"] = True
+    active_info = st.session_state.active_info_row
+    if active_info is not None and active_info < len(working_with_edit):
+        working_with_edit.at[active_info, "INFO"] = True
+
+    working_with_edit["NOTES_EDIT"] = False
+    active_notes = st.session_state.active_notes_row
+    if active_notes is not None and active_notes < len(working_with_edit):
+        working_with_edit.at[active_notes, "NOTES_EDIT"] = True
+
+    # -- Apply search filters (read values from session state) -----------------
+    sel_company = st.session_state.get("company_search", "All")
+    sel_kam = st.session_state.get("kam_search", "All")
+    has_kam_cols = (
+        "EEX_KAM" in working_with_edit.columns
+        and "INCUBEX_KAM" in working_with_edit.columns
+    )
+
+    display_df = working_with_edit
+    if sel_company != "All":
+        display_df = display_df[display_df["COMPANY"] == sel_company]
+    if sel_kam != "All" and has_kam_cols:
+        kam_mask = (
+            (display_df["EEX_KAM"] == sel_kam)
+            | (display_df["INCUBEX_KAM"] == sel_kam)
+        )
+        display_df = display_df[kam_mask]
+
+    # -- Column preset ---------------------------------------------------------
+    sel_preset = st.session_state.get("column_preset", "All")
+    cur_preset_columns = COLUMN_PRESETS.get(sel_preset or "All")
+
+    # -- Styled DataFrame ------------------------------------------------------
+    styled_df = display_df.style.applymap(
+        highlight_entry_date, subset=["ENTRY_DATE"]
+    )
+
+    # -- Column order ----------------------------------------------------------
+    _col_order_prefix = ["COMPANY", "CLIENT_TYPE", "CLIENT_STATUS"]
+    if has_kam_cols:
+        _col_order_prefix += ["EEX_KAM", "INCUBEX_KAM"]
+
+    _full_col_order = _col_order_prefix + [
+        "SENSITIVITIES", "BARRIERS", "EDIT",
+        "DECISION_MAKERS", "EUA_VOLUME", "GO_VOLUME",
+        "OTHER_PRODUCT_NOTES", "ACCESS_TYPE", "FRONT_END", "FRONT_END_DETAILS",
+        "CLEARERS", "BROKERS", "ETRM", "SOURCE", "NOTES", "NOTES_EDIT", "ENTRY_DATE",
+        "INFO",  # Always far right
+    ]
+
+    if cur_preset_columns is None:
+        _col_order = _full_col_order
+    else:
+        _col_order = [c for c in cur_preset_columns if c in _full_col_order]
+        if "INFO" not in _col_order:
+            _col_order.append("INFO")
+
+    # -- Data editor -----------------------------------------------------------
+    edited_df = st.data_editor(
+        styled_df,
+        column_config=get_column_config(
+            broker_options=broker_list, clearer_options=clearer_list
+        ),
+        column_order=_col_order,
+        use_container_width=True,
+        hide_index=True,
+        num_rows="fixed",
+        disabled=READ_ONLY_COLUMNS,
+        key="client_data_editor",
+    )
+
+    # -- Capture inline edits --------------------------------------------------
+    for _cap_idx in edited_df.index:
+        _cap_orig = st.session_state.original_df.loc[_cap_idx]
+        _cap_edit = edited_df.loc[_cap_idx]
+        _cap_row_edits = {}
+        for _cap_col in EDITABLE_COLUMNS + KAM_COLUMNS:
+            _cap_orig_val = _normalise(_cap_orig[_cap_col])
+            _cap_edit_val = _normalise(_cap_edit[_cap_col])
+            if _cap_col in ("EUA_VOLUME", "GO_VOLUME"):
+                _cap_orig_num = None if _cap_orig_val is None else float(_cap_orig_val)
+                _cap_edit_num = None if _cap_edit_val is None else float(_cap_edit_val)
+                if _cap_orig_num != _cap_edit_num:
+                    _cap_row_edits[_cap_col] = _cap_edit[_cap_col]
+            else:
+                if _cap_orig_val != _cap_edit_val:
+                    _cap_row_edits[_cap_col] = _cap_edit[_cap_col]
+        if _cap_row_edits:
+            st.session_state.inline_edits[_cap_idx] = _cap_row_edits
+        elif _cap_idx in st.session_state.inline_edits:
+            # User reverted all changes for this row — remove it
+            del st.session_state.inline_edits[_cap_idx]
+
+    # -- Panel enforcement (one panel at a time: Edit, Info, or Notes) ---------
+    new_edit = _resolve_checkbox(edited_df, "EDIT", "active_edit_row")
+    new_info = _resolve_checkbox(edited_df, "INFO", "active_info_row")
+    new_notes = _resolve_checkbox(edited_df, "NOTES_EDIT", "active_notes_row")
+
+    needs_rerun = False
+
+    # -- Edit column changed
+    if new_edit != st.session_state.active_edit_row:
+        old_edit = st.session_state.active_edit_row
+        if old_edit is not None:
+            st.session_state.pop(f"_panel_rendered_{old_edit}", None)
+        st.session_state.active_edit_row = new_edit
+        if new_edit is not None:
+            # Close other panels when edit panel opens
+            st.session_state.active_info_row = None
+            st.session_state.active_notes_row = None
+        needs_rerun = True
+
+    # -- Info column changed
+    if new_info != st.session_state.active_info_row:
+        st.session_state.active_info_row = new_info
+        if new_info is not None:
+            # Close other panels when info panel opens
+            st.session_state.active_edit_row = None
+            st.session_state.active_notes_row = None
+        needs_rerun = True
+
+    # -- Notes Edit column changed
+    if new_notes != st.session_state.active_notes_row:
+        st.session_state.active_notes_row = new_notes
+        if new_notes is not None:
+            # Close other panels when notes panel opens
+            st.session_state.active_edit_row = None
+            st.session_state.active_info_row = None
+        needs_rerun = True
+
+    if needs_rerun:
+        st.rerun(scope="fragment")
+
+    # -- Render the active panel (only one at a time) --------------------------
+    if st.session_state.active_edit_row is not None:
+        render_edit_panel(st.session_state.active_edit_row)
+        # Mark that widgets now exist so collect_panel_edits runs on the next rerun
+        st.session_state[f"_panel_rendered_{st.session_state.active_edit_row}"] = True
+    elif st.session_state.active_info_row is not None:
+        render_info_panel(st.session_state.active_info_row)
+    elif st.session_state.active_notes_row is not None:
+        render_notes_panel(st.session_state.active_notes_row)
+
+    # -- Buttons ---------------------------------------------------------------
+    col_left, col_mid, col_right = st.columns([1, 2, 1])
+
+    with col_mid:
+        submit_clicked = st.button(
+            "Submit Changes", type="primary", use_container_width=True
+        )
+
+    with col_right:
+        refresh_clicked = st.button("Refresh Data", use_container_width=True)
+
+    if refresh_clicked:
+        fetch_view_data.clear()
+        st.session_state.force_reload = True
+        st.rerun()  # Full app rerun to reload data
+
+    if submit_clicked:
+        changed = detect_changes(
+            st.session_state.original_df, edited_df,
+            st.session_state.panel_edits, st.session_state.inline_edits,
+        )
+        kam_changed = detect_kam_changes(
+            st.session_state.original_df, edited_df, st.session_state.inline_edits,
+        )
+        if not changed and not kam_changed:
+            st.info("No changes detected.")
+        else:
+            st.session_state.pending_changes = changed
+            st.session_state.pending_kam_changes = kam_changed
+            confirm_submit_dialog()
+
+    # Show result messages after a successful dialog submission
+    if st.session_state.get("submit_result"):
+        result = st.session_state.pop("submit_result")
+        if result["errors"]:
+            for err in result["errors"]:
+                st.error(err)
+        if result["success"] > 0:
+            st.success(f"Successfully submitted {result['success']} row(s).")
+            st.balloons()
+
+
+# Run the fragment
+editor_fragment()
