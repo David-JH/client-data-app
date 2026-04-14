@@ -1,931 +1,1023 @@
 """
-Streamlit App for Client Data Entry to Snowflake
-Database: INCUBEX_DATA_LAKE / CLIENTS / CLIENTS
+Tabular Client Data Editor
+--------------------------
+Displays all client data from STREAMLIT_APP_VIEW in an editable table.
+Changes are submitted as new rows (append-only history) into the CLIENTS table.
+
+Run from the project root so .streamlit/secrets.toml is picked up:
+    streamlit run Tabular_Streamlit/tabular_app.py
 """
 
-import streamlit as st
-import snowflake.connector
-from datetime import date, datetime
-import pandas as pd
 import json
+from datetime import datetime
 
-# Impact level mappings: label <-> numeric value
-IMPACT_LABEL_TO_VALUE = {
-    "None": 0.0,
-    "Low": 0.25,
-    "Medium": 0.5,
-    "High": 0.75,
-    "Dealbreaker": 1.0,
-}
-IMPACT_VALUE_TO_LABEL = {v: k for k, v in reversed(list(IMPACT_LABEL_TO_VALUE.items()))}
-IMPACT_OPTIONS = list(IMPACT_LABEL_TO_VALUE.keys())
+import pandas as pd
+import streamlit as st
 
-# Page configuration
-st.set_page_config(
-    page_title="Client Data Entry",
-    page_icon="📊",
-    layout="centered"
+from config import (
+    EDITABLE_COLUMNS,
+    READ_ONLY_COLUMNS,
+    KAM_COLUMNS,
+    SENSITIVITY_TYPES,
+    BLOCKER_TYPES,
+    QUALIFICATION_OPTIONS,
+    QUALIFICATION_TO_VALUE,
+    VALUE_TO_QUALIFICATION,
+    ALL_FIELDS_LABELS,
+    COLUMN_PRESETS,
+    get_column_config,
 )
+from db import fetch_view_data, fetch_firm_names, insert_changed_rows, upsert_prospect_kam
 
-# Custom CSS for better styling
-st.markdown("""
+# == Page config ===============================================================
+
+st.set_page_config(page_title="Client Data - Tabular View", page_icon="📋", layout="wide")
+
+st.markdown(
+    """
     <style>
-    .main-header {
-        font-size: 3rem;
-        font-weight: bold;
-        color: #1E3A5F;
-        margin-bottom: 0.5rem;
-    }
-    .sub-header {
-        font-size: 1.8rem;
-        font-weight: 600;
-        color: #2E4A6F;
-        margin-top: 1.5rem;
-        margin-bottom: 1rem;
-    }
-    .success-box {
-        padding: 1rem;
-        background-color: #d4edda;
-        border-radius: 5px;
-        border: 1px solid #c3e6cb;
-    }
-    /* Submit button styling */
-    div.stFormSubmitButton {
-        text-align: center !important;
-    }
-    div.stFormSubmitButton > button {
-        background-color: #4CAF50 !important;
-        color: white !important;
-        font-weight: bold !important;
-        min-width: 300px !important;
-        width: 50% !important;
-        border-radius: 8px !important;
-        padding: 0.75rem 2rem !important;
-        white-space: nowrap !important;
-    }
-    div.stFormSubmitButton > button:hover {
-        background-color: #45a049 !important;
-    }
-    /* Client Type toggle button styling */
-    div[data-testid="stHorizontalBlock"] .stButton > button {
-        width: 100%;
-        border-radius: 8px;
-        padding: 0.5rem 1rem;
-        font-weight: 600;
-        transition: all 0.2s ease;
-    }
-    .client-type-label {
-        font-size: 1rem;
-        font-weight: 600;
-        color: #2E4A6F;
-        margin-bottom: 0.5rem;
-    }
-    /* Light pink background for required fields (Company and Client Type) */
-    .required-field div[data-baseweb="select"] > div {
-        background-color: #fff5f5 !important;
+    .main-header {font-size: 2rem; font-weight: 700; color: #1E3A5F; margin-bottom: 0.5rem;}
+    .sub-header  {font-size: 1.2rem; font-weight: 600; color: #2E4A6F;}
+    div[data-testid="stDataEditor"] {border: 1px solid #ddd; border-radius: 8px;}
+    /* Make data editor column headers bold and black */
+    div[data-testid="stDataEditor"] [data-testid="glide-data-grid-canvas"] {
+        --gdg-text-header: #000000 !important;
+        --gdg-text-header-selected: #000000 !important;
     }
     </style>
-""", unsafe_allow_html=True)
+    """,
+    unsafe_allow_html=True,
+)
+
+st.markdown('<p class="main-header">📋 Client Data - Tabular View</p>', unsafe_allow_html=True)
+
+# -- User guide ----------------------------------------------------------------
+
+with st.expander("How to use this page", expanded=False):
+    st.markdown(
+        """
+**Searching**
+- Use the **Search company** dropdown above the table to filter rows by company name.
+  You can type in the dropdown to quickly find a company. Select **All** to show all rows.
+- Use the **Search KAM** dropdown to filter by Key Account Manager. This searches across
+  both EEX KAM and Incubex KAM columns. Both filters can be used together.
+
+**Column presets**
+- Use the preset buttons below the search bars to switch between different column views.
+- **All** shows every column. **Meeting Notes** focuses on client details, notes, and source.
+  **Sensitivities & Blockers** shows S/B data and volumes. **Technical** shows infrastructure details.
+  **Volumes & Products** shows commercial data.
+- The **Last Update Dates** column is always visible on the far right in all presets.
+
+**Viewing data**
+- The table below shows all client records from the database.
+- You can **sort** any column by clicking its header, and **filter** by typing in the column filter row.
+- Columns are scrollable horizontally if the table is wider than your screen.
+
+**Editing inline fields**
+- Most columns (Status, Decision Makers, Volumes, Access Type, etc.) can be edited
+  directly in the table -- just click a cell and type or select a new value.
+
+**Editing Sensitivities & Blockers**
+- These columns contain structured data and cannot be edited inline.
+- To edit them, tick the **Edit S/B** checkbox (the column after Blockers).
+  This opens a panel below the table where you can set each sensitivity/blocker type
+  and its qualification level (Unknown, None, Low, Medium, High, Dealbreaker).
+- Changes are previewed immediately in the Sensitivities / Blockers columns.
+
+**Viewing field update dates**
+- Tick the **Last Update Dates** checkbox (far right of each row) to see when each field was last updated.
+- Only one panel (Edit S/B or Last Update Dates) can be open at a time -- ticking one closes the other.
+
+**Saving changes**
+- When you are finished editing, click **Submit Changes**.
+- Only rows with actual changes are saved (as new records in the database).
+- Click **Refresh Data** to reload the latest data from Snowflake.
+
+**Entry Date colours**
+- 🟢 Green = updated within the last 14 days
+- 🟡 Yellow = updated 15-60 days ago
+- 🔴 Red = updated more than 60 days ago
+        """
+    )
 
 
-def get_snowflake_connection(schema="CLIENTS", max_retries=3):
-    """
-    Create Snowflake connection using Streamlit secrets with retry logic.
-    For Streamlit Cloud deployment, secrets are stored in .streamlit/secrets.toml
-    """
-    import time
+# == Helpers ===================================================================
 
-    last_error = None
-    for attempt in range(max_retries):
-        try:
-            conn = snowflake.connector.connect(
-                user=st.secrets["snowflake"]["user"],
-                password=st.secrets["snowflake"]["password"],
-                account=st.secrets["snowflake"]["account"],
-                warehouse=st.secrets["snowflake"]["warehouse"],
-                database="INCUBEX_DATA_LAKE",
-                schema=schema
-            )
-            return conn
-        except Exception as e:
-            last_error = e
-            if attempt < max_retries - 1:
-                time.sleep(1)  # Wait 1 second before retrying
-
-    st.error(f"Connection error after {max_retries} attempts: {str(last_error)}")
-    return None
-
-
-@st.cache_data(ttl=300)  # Cache for 5 minutes
-def get_all_data():
-    """
-    Fetch all dropdown lists and client data using a single connection.
-    Returns a tuple of (companies, brokers, clearers, clients_df, recent_df).
-    """
-    companies = []
-    brokers = []
-    clearers = []
-    clients_df = pd.DataFrame()
-    recent_df = pd.DataFrame()
-
-    conn = get_snowflake_connection()
-    if conn is None:
-        return companies, brokers, clearers, clients_df, recent_df
-
-    cursor = None
-    try:
-        cursor = conn.cursor()
-
-        # Fetch all firm names (brokers, clearers, customers) in a single query
-        cursor.execute("""
-            SELECT DISTINCT BROKER, CLEARER, CUSTOMER
-            FROM ALL_FIRM_NAMES
-            WHERE BROKER IS NOT NULL OR CLEARER IS NOT NULL OR CUSTOMER IS NOT NULL
-            ORDER BY BROKER, CLEARER, CUSTOMER
-        """)
-        for row in cursor.fetchall():
-            if row[0]:  # BROKER column
-                brokers.append(row[0])
-            if row[1]:  # CLEARER column
-                clearers.append(row[1])
-            if row[2]:  # CUSTOMER column
-                companies.append(row[2])
-
-        # Fetch all client data from STREAMLIT_APP_VIEW view
-        cursor.execute("""
-            SELECT COMPANY, CLIENT_TYPE, CLIENT_STATUS, SENSITIVITIES, BARRIERS,
-                   DECISION_MAKERS, EUA_VOLUME, GO_VOLUME, OTHER_PRODUCT_NOTES,
-                   ACCESS_TYPE, FRONT_END, FRONT_END_DETAILS, CLEARERS, BROKERS,
-                   ETRM, SOURCE, NOTES
-            FROM STREAMLIT_APP_VIEW
-        """)
-        columns = ['COMPANY', 'CLIENT_TYPE', 'CLIENT_STATUS', 'SENSITIVITIES', 'BARRIERS',
-                   'DECISION_MAKERS', 'EUA_VOLUME', 'GO_VOLUME', 'OTHER_PRODUCT_NOTES',
-                   'ACCESS_TYPE', 'FRONT_END', 'FRONT_END_DETAILS', 'CLEARERS', 'BROKERS',
-                   'ETRM', 'SOURCE', 'NOTES']
-        clients_df = pd.DataFrame(cursor.fetchall(), columns=columns)
-
-        # Fetch 5 most recent records for display
-        cursor.execute("""
-            SELECT ENTRY_DATE, COMPANY, CLIENT_TYPE, CLIENT_STATUS, SENSITIVITIES, BARRIERS,
-                   DECISION_MAKERS, EUA_VOLUME, GO_VOLUME, OTHER_PRODUCT_NOTES,
-                   ACCESS_TYPE, FRONT_END, FRONT_END_DETAILS, CLEARERS, BROKERS,
-                   ETRM, SOURCE, NOTES
-            FROM STREAMLIT_APP_VIEW
-            ORDER BY ENTRY_DATE DESC
-            LIMIT 5
-        """)
-        recent_columns = ['ENTRY_DATE', 'COMPANY', 'CLIENT_TYPE', 'CLIENT_STATUS', 'SENSITIVITIES', 'BARRIERS',
-                          'DECISION_MAKERS', 'EUA_VOLUME', 'GO_VOLUME', 'OTHER_PRODUCT_NOTES',
-                          'ACCESS_TYPE', 'FRONT_END', 'FRONT_END_DETAILS', 'CLEARERS', 'BROKERS',
-                          'ETRM', 'SOURCE', 'NOTES']
-        recent_df = pd.DataFrame(cursor.fetchall(), columns=recent_columns)
-
-    except Exception as e:
-        st.error(f"Error fetching data: {str(e)}")
-    finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
-
-    return companies, brokers, clearers, clients_df, recent_df
-
-
-def parse_comma_string(value: str) -> list:
-    """Parse a comma-separated string into a list of stripped values."""
-    if not value or pd.isna(value):
-        return []
-    return [item.strip() for item in str(value).split(",") if item.strip()]
-
-
-def parse_sensitivities_json(value) -> dict:
-    """
-    Parse sensitivities from JSON/VARIANT format.
-    Converts numeric values to labels for display.
-    Returns dict like {'Margin': 'High'}.
-    """
-    if not value or pd.isna(value):
+def _raw_dict_to_labels(raw) -> dict:
+    """Convert {type: numeric} -> {type: label} for pre-populating dropdowns."""
+    if not raw or not isinstance(raw, dict):
         return {}
-    # Snowflake VARIANT comes through as dict or JSON string
-    raw_dict = {}
-    if isinstance(value, dict):
-        raw_dict = value
-    elif isinstance(value, str):
-        try:
-            raw_dict = json.loads(value)
-        except json.JSONDecodeError:
-            return {}
-    else:
-        return {}
-
-    # Convert numeric values to labels
     result = {}
-    for sens, impact in raw_dict.items():
-        if isinstance(impact, (int, float)):
-            # Convert numeric to label
-            result[sens] = IMPACT_VALUE_TO_LABEL.get(float(impact), IMPACT_OPTIONS[0])
+    for key, val in raw.items():
+        if isinstance(val, str):
+            result[key] = val
+        elif isinstance(val, (int, float)):
+            result[key] = VALUE_TO_QUALIFICATION.get(float(val), QUALIFICATION_OPTIONS[0])
         else:
-            # Already a label string
-            result[sens] = impact
+            result[key] = QUALIFICATION_OPTIONS[0]
     return result
 
 
-def get_prefill_data(clients_df: pd.DataFrame, company: str, client_type: str) -> dict:
+def _labels_to_display(labels: dict) -> str:
+    """Convert {type: label} dict to display string like 'Margin: High, Fees: Low'."""
+    if not labels:
+        return ""
+    return ", ".join(f"{k}: {v}" for k, v in labels.items())
+
+
+def _panel_edit_to_labels(pe: dict, field: str) -> dict:
+    """Convert a panel_edits entry back to {type: label} for display.
+
+    pe[field] is a dict like {"Margin": 0.75, "Fees": 0.25} (numeric values).
     """
-    Get prefill data for a specific company and client type combination.
-    Returns a dict with field values or empty dict if no match.
-    """
-    if clients_df.empty or not company or not client_type:
+    raw = pe.get(field, {})
+    if not raw:
         return {}
-
-    mask = (clients_df['COMPANY'] == company) & (clients_df['CLIENT_TYPE'] == client_type)
-    matched = clients_df[mask]
-
-    if matched.empty:
-        return {}
-
-    row = matched.iloc[0]
-    sensitivities_dict = parse_sensitivities_json(row['SENSITIVITIES'])
-    barriers_dict = parse_sensitivities_json(row['BARRIERS'])
-    return {
-        'client_status': row['CLIENT_STATUS'] if pd.notna(row['CLIENT_STATUS']) else None,
-        'sensitivities': list(sensitivities_dict.keys()),
-        'sensitivities_impact': sensitivities_dict,
-        'barriers': list(barriers_dict.keys()),
-        'barriers_impact': barriers_dict,
-        'decision_makers': row['DECISION_MAKERS'] if pd.notna(row['DECISION_MAKERS']) else "",
-        'eua_volume': int(float(row['EUA_VOLUME'])) if pd.notna(row['EUA_VOLUME']) else None,
-        'go_volume': int(float(row['GO_VOLUME'])) if pd.notna(row['GO_VOLUME']) else None,
-        'other_product_notes': row['OTHER_PRODUCT_NOTES'] if pd.notna(row['OTHER_PRODUCT_NOTES']) else "",
-        'access_type': row['ACCESS_TYPE'] if pd.notna(row['ACCESS_TYPE']) else None,
-        'front_end': parse_comma_string(row['FRONT_END']),
-        'front_end_details': row['FRONT_END_DETAILS'] if pd.notna(row['FRONT_END_DETAILS']) else "",
-        'clearers': parse_comma_string(row['CLEARERS']),
-        'brokers': parse_comma_string(row['BROKERS']),
-        'etrm': row['ETRM'] if pd.notna(row['ETRM']) else None,
-        'source': row['SOURCE'] if pd.notna(row['SOURCE']) else None,
-        'notes': row['NOTES'] if pd.notna(row['NOTES']) else "",
-    }
+    return {k: VALUE_TO_QUALIFICATION.get(float(v), str(v)) for k, v in raw.items()}
 
 
-def insert_client_data(data: dict) -> bool:
+def collect_panel_edits(row_idx: int) -> dict:
+    """Read the current state of the edit panel widgets for a given row.
+
+    Must be defined before first use (called early in the script to collect
+    widget state at the start of each Streamlit rerun).
     """
-    Insert client data into Snowflake CLIENTS table.
-    UPDATE_ID and DATE are auto-generated by Snowflake.
-    """
-    conn = get_snowflake_connection()
-    if conn is None:
-        return False
+    sens = {}
+    for sens_type in SENSITIVITY_TYPES:
+        if st.session_state.get(f"sens_cb_{row_idx}_{sens_type}", False):
+            label = st.session_state.get(
+                f"sens_qual_{row_idx}_{sens_type}", QUALIFICATION_OPTIONS[0]
+            )
+            sens[sens_type] = QUALIFICATION_TO_VALUE.get(label, 0.0)
 
+    blocks = {}
+    for block_type in BLOCKER_TYPES:
+        if st.session_state.get(f"block_cb_{row_idx}_{block_type}", False):
+            label = st.session_state.get(
+                f"block_qual_{row_idx}_{block_type}", QUALIFICATION_OPTIONS[0]
+            )
+            blocks[block_type] = QUALIFICATION_TO_VALUE.get(label, 0.0)
+
+    return {"sensitivities": sens, "barriers": blocks}
+
+
+def _normalise(value):
+    """Collapse NaN / None / empty-string into None for comparison."""
+    if value is None:
+        return None
+    if isinstance(value, float) and pd.isna(value):
+        return None
+    if isinstance(value, str) and value.strip() == "":
+        return None
+    return value
+
+
+# == Date-based colour coding ==================================================
+
+def highlight_entry_date(val):
+    """Colour ENTRY_DATE cells by age: green <=14d, yellow 15-60d, red 60+d."""
+    if pd.isna(val):
+        return ""
     try:
-        cursor = conn.cursor()
-
-        insert_query = """
-        INSERT INTO CLIENTS (
-            CLIENT_STATUS, CLIENT_TYPE, COMPANY, SENSITIVITIES, BARRIERS,
-            DECISION_MAKERS, OVERALL_VOLUME, EUA_VOLUME, GO_VOLUME,
-            POWER_VOLUME, GAS_VOLUME, OTHER_PRODUCT_NOTES, ACCESS_TYPE,
-            FRONT_END, FRONT_END_DETAILS, CLEARERS, BROKERS, ETRM, SOURCE, NOTES
-        )
-        SELECT
-            %(client_status)s, %(client_type)s, %(company)s, PARSE_JSON(%(sensitivities)s), PARSE_JSON(%(barriers)s),
-            %(decision_makers)s, %(overall_volume)s, %(eua_volume)s, %(go_volume)s,
-            %(power_volume)s, %(gas_volume)s, %(other_product_notes)s, %(access_type)s,
-            %(front_end)s, %(front_end_details)s, %(clearers)s, %(brokers)s, %(etrm)s, %(source)s, %(notes)s
-        """
-
-        cursor.execute(insert_query, data)
-        conn.commit()
-        cursor.close()
-        conn.close()
-        return True
-
-    except Exception as e:
-        st.error(f"Insert error: {str(e)}")
-        if conn:
-            conn.close()
-        return False
+        entry = pd.Timestamp(val)
+        days_old = (pd.Timestamp(datetime.now()) - entry).days
+    except Exception:
+        return ""
+    if days_old <= 14:
+        return "background-color: #90EE90"
+    elif days_old <= 60:
+        return "background-color: #FFFFE0"
+    else:
+        return "background-color: #FFB6C6"
 
 
-def main():
-    st.markdown('<p class="main-header">📊 Client Data Entry Form</p>', unsafe_allow_html=True)
-    st.markdown("Enter client information below to add to the database.")
+# == Panel rendering functions =================================================
 
-    st.info("""
-**Required fields:** Company and Client Type (marked with *)
+def render_edit_panel(row_idx: int):
+    """Render the Sensitivities + Blockers edit panel for one row."""
+    orig_row = st.session_state.original_df.iloc[row_idx]
+    company = orig_row["COMPANY"]
+    client_type = orig_row["CLIENT_TYPE"]
 
-**Note:** Resubmitting for an existing company will update the record. Click **Submit** at the bottom to save.
-""")
-
-    with st.expander("📖 User Guide"):
-        st.markdown("""
-**Getting Started**
-- Select an existing company from the dropdown, or choose "Enter new company" to add a new prospect
-- Choose the Client Type (Customer, Clearer, or Broker) - this is required
-- If a record already exists for the Company + Client Type combination, the form will pre-fill with existing data
-
-**Updating Records**
-- To update an existing record, simply select the same Company and Client Type, make your changes, and submit
-- The new submission will become the current record (previous versions are retained in history)
-
-**Volume Information**
-- You can enter volumes as an estimated range OR an exact number
-- If you enter both, the exact number takes priority
-
-**Service Providers**
-- Select clearers and brokers from the dropdown lists
-- If a clearer or broker isn't in the list, check "Add new" and type the name(s) comma-separated
-
-**Refresh Data**
-- After submitting, your new entry won't appear in dropdowns immediately (data is cached for performance)
-- Click "Refresh Data" below the Submit button to reload the latest data from the database
-""")
-
-    st.markdown("<hr style='border: 2px solid #ccc; margin: 2rem 0;'>", unsafe_allow_html=True)
-
-    # Initialize session state for company fields
-    if 'company_selection' not in st.session_state:
-        st.session_state.company_selection = "Select a company..."
-    if 'new_company_name' not in st.session_state:
-        st.session_state.new_company_name = ""
-    if 'client_type_selection' not in st.session_state:
-        st.session_state.client_type_selection = None
-
-    # Initialize session state for clearers/brokers fields
-    if 'clearers' not in st.session_state:
-        st.session_state.clearers = []
-    if 'add_new_clearer' not in st.session_state:
-        st.session_state.add_new_clearer = False
-    if 'additional_clearers' not in st.session_state:
-        st.session_state.additional_clearers = ""
-    if 'brokers' not in st.session_state:
-        st.session_state.brokers = []
-    if 'add_new_broker' not in st.session_state:
-        st.session_state.add_new_broker = False
-    if 'additional_brokers' not in st.session_state:
-        st.session_state.additional_brokers = ""
-
-    # Check if we need to reset fields (set by successful form submission)
-    if st.session_state.get('reset_company_fields', False):
-        st.session_state.company_selection = "Select a company..."
-        st.session_state.new_company_name = ""
-        st.session_state.client_type_selection = None
-        st.session_state.clearers = []
-        st.session_state.add_new_clearer = False
-        st.session_state.additional_clearers = ""
-        st.session_state.brokers = []
-        st.session_state.add_new_broker = False
-        st.session_state.additional_brokers = ""
-        st.session_state.go_volume_range = None
-        st.session_state.go_volume_exact = None
-        st.session_state.previous_selection = None
-        # Reset sensitivities
-        for sens in ["Margin", "Fees", "Friction", "Liquidity (Orderbook)", "Liquidity (OI)", "Settlement"]:
-            st.session_state[f"sens_{sens}"] = False
-            if f"sens_impact_{sens}" in st.session_state:
-                del st.session_state[f"sens_impact_{sens}"]
-        # Reset barriers
-        for blk in ["Habit (e.g. ICE Default)", "Systems Setup (EEX)", "Systems Setup (Client or External)", "Compliance", "Risk", "Onboarding/KYC", "Execution speed"]:
-            st.session_state[f"blk_{blk}"] = False
-            if f"blk_impact_{blk}" in st.session_state:
-                del st.session_state[f"blk_impact_{blk}"]
-        st.session_state.reset_company_fields = False
-
-    # Show success message and balloons after rerun
-    if st.session_state.get('show_success', False):
-        st.success("Client data submitted successfully!")
-        st.balloons()
-        st.session_state.show_success = False
-
-    # Fetch all data using single connection
-    company_list, broker_list, clearer_list, clients_df, recent_df = get_all_data()
-
-    # Required Info section in bordered container
-    with st.container(border=True):
-        st.markdown("**Required Info**")
-
-        # Company selection outside form for dynamic behavior
-        company_selection = st.selectbox(
-            "Company *",
-            options=["Select a company...", "-- Enter new company --"] + company_list,
-            index=0,
-            key="company_selection",
-            help="Select from list or choose 'Enter new company' to add a new prospect"
-        )
-
-        # Show text input if user wants to enter a new company
-        if company_selection == "-- Enter new company --":
-            company = st.text_input(
-                "New Company Name *",
-                placeholder="Enter company name...",
-                key="new_company_name",
-                help="Type the name of the new company/prospect"
-            )
-        else:
-            company = company_selection
-
-        # Client Type selection outside form for dynamic prefill
-        client_type = st.selectbox(
-            "Client Type *",
-            options=["Customer", "Clearer", "Broker"],
-            index=None,
-            placeholder="Select client type...",
-            key="client_type_selection",
-            help="Select the type of client"
-        )
-
-    # Get prefill data based on Company + Client Type selection
-    prefill = get_prefill_data(clients_df, company, client_type)
-
-    # Track current selection to detect changes
-    current_selection = f"{company}|{client_type}"
-    previous_selection = st.session_state.get('previous_selection', None)
-
-    # Update session state fields when selection changes
-    if current_selection != previous_selection:
-        st.session_state.previous_selection = current_selection
-        if prefill:
-            st.session_state.clearers = prefill.get('clearers', [])
-            st.session_state.brokers = prefill.get('brokers', [])
-            st.session_state.go_volume_range = None
-            st.session_state.go_volume_exact = prefill.get('go_volume')
-            # Update sensitivities checkboxes and impact dropdowns
-            prefill_sens = prefill.get('sensitivities', [])
-            prefill_impact = prefill.get('sensitivities_impact', {})
-            for sens in ["Margin", "Fees", "Friction", "Liquidity (Orderbook)", "Liquidity (OI)", "Settlement"]:
-                st.session_state[f"sens_{sens}"] = sens in prefill_sens
-                if sens in prefill_impact:
-                    st.session_state[f"sens_impact_{sens}"] = prefill_impact[sens]
-            # Update barriers checkboxes and impact dropdowns
-            prefill_blk = prefill.get('barriers', [])
-            prefill_blk_impact = prefill.get('barriers_impact', {})
-            for blk in ["Habit (e.g. ICE Default)", "Systems Setup (EEX)", "Systems Setup (Client or External)", "Compliance", "Risk", "Onboarding/KYC", "Execution speed"]:
-                st.session_state[f"blk_{blk}"] = blk in prefill_blk
-                if blk in prefill_blk_impact:
-                    st.session_state[f"blk_impact_{blk}"] = prefill_blk_impact[blk]
-        else:
-            # Clear if no prefill data for new selection
-            st.session_state.clearers = []
-            st.session_state.brokers = []
-            st.session_state.go_volume_range = None
-            st.session_state.go_volume_exact = None
-            # Clear sensitivities
-            for sens in ["Margin", "Fees", "Friction", "Liquidity (Orderbook)", "Liquidity (OI)", "Settlement"]:
-                st.session_state[f"sens_{sens}"] = False
-                if f"sens_impact_{sens}" in st.session_state:
-                    del st.session_state[f"sens_impact_{sens}"]
-            # Clear barriers
-            for blk in ["Habit (e.g. ICE Default)", "Systems Setup (EEX)", "Systems Setup (Client or External)", "Compliance", "Risk", "Onboarding/KYC", "Execution speed"]:
-                st.session_state[f"blk_{blk}"] = False
-                if f"blk_impact_{blk}" in st.session_state:
-                    del st.session_state[f"blk_impact_{blk}"]
-
-    # Clearers and Brokers outside form for dynamic checkbox behavior
-    st.markdown('<p class="sub-header">Service Providers</p>', unsafe_allow_html=True)
-
-    # Extend dropdown options with any prefilled values not already in the list
-    clearer_options = list(clearer_list)
-    for c in prefill.get('clearers', []):
-        if c and c not in clearer_options:
-            clearer_options.append(c)
-
-    broker_options = list(broker_list)
-    for b in prefill.get('brokers', []):
-        if b and b not in broker_options:
-            broker_options.append(b)
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        clearers = st.multiselect(
-            "Clearers",
-            options=clearer_options,
-            key="clearers",
-            help="Clearing firms used (select multiple)"
-        )
-        add_new_clearer = st.checkbox("Add new clearer not in list", key="add_new_clearer")
-        if add_new_clearer:
-            additional_clearers = st.text_input(
-                "New Clearer(s)",
-                placeholder="Enter new clearer names (comma-separated)",
-                key="additional_clearers",
-                help="Add clearers not in the list above"
-            )
-        else:
-            additional_clearers = ""
-
-    with col2:
-        brokers = st.multiselect(
-            "Brokers",
-            options=broker_options,
-            key="brokers",
-            help="Brokers used (select multiple)"
-        )
-        add_new_broker = st.checkbox("Add new broker not in list", key="add_new_broker")
-        if add_new_broker:
-            additional_brokers = st.text_input(
-                "New Broker(s)",
-                placeholder="Enter new broker names (comma-separated)",
-                key="additional_brokers",
-                help="Add brokers not in the list above"
-            )
-        else:
-            additional_brokers = ""
-
-    # Sensitivities section - outside form for dynamic behavior
-    st.markdown('<p class="sub-header">Trading Information</p>', unsafe_allow_html=True)
-
-    sensitivities_options = ["Margin", "Fees", "Friction", "Liquidity (Orderbook)", "Liquidity (OI)", "Settlement"]
+    # Pre-populate from accumulated panel_edits if the user has actually interacted
+    # with the panel (i.e. the edit contains data).  On the very first open,
+    # collect_panel_edits stores {"sensitivities": {}, "barriers": {}} because the
+    # widgets don't exist yet — we must fall through to the original raw data in
+    # that case so existing values are shown.
+    existing_pe = st.session_state.panel_edits.get(row_idx)
+    pe_has_data = (
+        existing_pe
+        and (existing_pe.get("sensitivities") or existing_pe.get("barriers"))
+    )
+    if pe_has_data:
+        sens_labels = _panel_edit_to_labels(existing_pe, "sensitivities")
+        block_labels = _panel_edit_to_labels(existing_pe, "barriers")
+    else:
+        sens_labels = _raw_dict_to_labels(orig_row.get("_SENSITIVITIES_RAW", {}))
+        block_labels = _raw_dict_to_labels(orig_row.get("_BARRIERS_RAW", {}))
 
     with st.container(border=True):
-        st.markdown("**Sensitivities**")
-        st.caption("Key issues that direct flow - select qualification level for each")
+        st.markdown(
+            f'<p class="sub-header">Editing: {company} ({client_type})</p>',
+            unsafe_allow_html=True,
+        )
 
-        sensitivities_with_impact = {}
-        for sens in sensitivities_options:
-            sens_col1, sens_col2 = st.columns([1, 2])
-            with sens_col1:
-                # Initialize session state if not exists
-                if f"sens_{sens}" not in st.session_state:
-                    st.session_state[f"sens_{sens}"] = False
-                selected = st.checkbox(sens, key=f"sens_{sens}")
-            with sens_col2:
-                if selected:
-                    # Initialize impact session state if not exists
-                    if f"sens_impact_{sens}" not in st.session_state:
-                        st.session_state[f"sens_impact_{sens}"] = IMPACT_OPTIONS[0]
-                    impact = st.selectbox(
-                        f"{sens} impact",
-                        options=IMPACT_OPTIONS,
-                        key=f"sens_impact_{sens}",
-                        label_visibility="collapsed"
+        col_sens, col_block = st.columns(2)
+
+        # -- Sensitivities --------------------------------------------------
+        with col_sens:
+            st.markdown("**Sensitivities**")
+            for sens_type in SENSITIVITY_TYPES:
+                c1, c2 = st.columns([1, 2])
+                default_checked = sens_type in sens_labels
+                with c1:
+                    checked = st.checkbox(
+                        sens_type,
+                        value=default_checked,
+                        key=f"sens_cb_{row_idx}_{sens_type}",
                     )
-                    sensitivities_with_impact[sens] = impact
+                with c2:
+                    if checked:
+                        default_qual = sens_labels.get(sens_type, QUALIFICATION_OPTIONS[0])
+                        default_idx = (
+                            QUALIFICATION_OPTIONS.index(default_qual)
+                            if default_qual in QUALIFICATION_OPTIONS
+                            else 0
+                        )
+                        st.selectbox(
+                            f"{sens_type} level",
+                            options=QUALIFICATION_OPTIONS,
+                            index=default_idx,
+                            key=f"sens_qual_{row_idx}_{sens_type}",
+                            label_visibility="collapsed",
+                        )
 
-    # Barriers section - outside form for dynamic behavior (matches sensitivities pattern)
-    barriers_options = [
-        "Habit (e.g. ICE Default)",
-        "Systems Setup (EEX)",
-        "Systems Setup (Client or External)",
-        "Compliance",
-        "Risk",
-        "Onboarding/KYC",
-        "Execution speed",
-    ]
+        # -- Blockers -------------------------------------------------------
+        with col_block:
+            st.markdown("**Blockers**")
+            for block_type in BLOCKER_TYPES:
+                c1, c2 = st.columns([1, 2])
+                default_checked = block_type in block_labels
+                with c1:
+                    checked = st.checkbox(
+                        block_type,
+                        value=default_checked,
+                        key=f"block_cb_{row_idx}_{block_type}",
+                    )
+                with c2:
+                    if checked:
+                        default_qual = block_labels.get(block_type, QUALIFICATION_OPTIONS[0])
+                        default_idx = (
+                            QUALIFICATION_OPTIONS.index(default_qual)
+                            if default_qual in QUALIFICATION_OPTIONS
+                            else 0
+                        )
+                        st.selectbox(
+                            f"{block_type} level",
+                            options=QUALIFICATION_OPTIONS,
+                            index=default_idx,
+                            key=f"block_qual_{row_idx}_{block_type}",
+                            label_visibility="collapsed",
+                        )
+
+
+def render_info_panel(row_idx: int):
+    """Show when each field was last updated for a given row.
+
+    Reads per-field dates from the _FIELD_UPDATE_DATES_RAW column
+    (a dict parsed from the FIELD_UPDATE_DATES JSON column on the view).
+    """
+    orig_row = st.session_state.original_df.iloc[row_idx]
+    company = orig_row["COMPANY"]
+    client_type = orig_row["CLIENT_TYPE"]
+    update_dates = orig_row.get("_FIELD_UPDATE_DATES_RAW", {}) or {}
 
     with st.container(border=True):
-        st.markdown("**Barriers**")
-        st.caption("Barriers to trading - select qualification level for each")
-
-        barriers_with_impact = {}
-        for blk in barriers_options:
-            blk_col1, blk_col2 = st.columns([1, 2])
-            with blk_col1:
-                if f"blk_{blk}" not in st.session_state:
-                    st.session_state[f"blk_{blk}"] = False
-                blk_selected = st.checkbox(blk, key=f"blk_{blk}")
-            with blk_col2:
-                if blk_selected:
-                    if f"blk_impact_{blk}" not in st.session_state:
-                        st.session_state[f"blk_impact_{blk}"] = IMPACT_OPTIONS[0]
-                    blk_impact = st.selectbox(
-                        f"{blk} impact",
-                        options=IMPACT_OPTIONS,
-                        key=f"blk_impact_{blk}",
-                        label_visibility="collapsed"
-                    )
-                    barriers_with_impact[blk] = blk_impact
-
-    # Create form
-    with st.form("client_form", clear_on_submit=True):
-
-        # Client Status - with prefill
-        status_options = ["Client", "Prospect", "Setting up"]
-        status_index = None
-        if prefill.get('client_status') in status_options:
-            status_index = status_options.index(prefill['client_status'])
-        client_status = st.selectbox(
-            "Client Status",
-            options=status_options,
-            index=status_index,
-            placeholder="Select status...",
-            help="Current status of the client"
+        st.markdown(
+            f'<p class="sub-header">Field update dates: {company} ({client_type})</p>',
+            unsafe_allow_html=True,
         )
 
-        # Decision Makers - with prefill
-        decision_makers = st.text_input(
-            "Decision Makers",
-            value=prefill.get('decision_makers', ""),
-            placeholder="e.g., Head of desk (John Smith)",
-            help="Key decision makers"
-        )
+        if not update_dates:
+            st.info("No update history found for this record.")
+            return
 
-        st.markdown('<p class="sub-header">Volume Information</p>', unsafe_allow_html=True)
-        st.caption("Client's total annual volumes across all exchanges. Enter volume range or exact number per product.")
-
-        # EUA Volume - Range dropdown OR exact number input (prefill to exact field)
-        st.markdown("EUA Volume (Lots)")
-        eua_col1, eua_col2 = st.columns(2)
-        with eua_col1:
-            eua_volume_range = st.selectbox(
-                "Estimated Range",
-                options=[None, "<2.5k", "2.5-5k", "5-10k", "10-20k", "20-50k", "50k+"],
-                index=0,
-                format_func=lambda x: "Select range..." if x is None else x,
-                help="Select an estimated volume range"
-            )
-        with eua_col2:
-            eua_volume_exact = st.number_input(
-                "Exact Volume",
-                min_value=0,
-                value=prefill.get('eua_volume'),
-                help="Or enter exact volume in lots"
-            )
-
-        # GO Volume - Range dropdown OR exact number input (prefill to exact field)
-        st.markdown("GO Volume (Lots)")
-        go_col1, go_col2 = st.columns(2)
-        with go_col1:
-            go_volume_range = st.selectbox(
-                "Estimated Range",
-                options=[None, "<2.5k", "2.5-5k", "5-10k", "10-20k", "20k+"],
-                format_func=lambda x: "Select range..." if x is None else x,
-                help="Select an estimated volume range",
-                key="go_volume_range"
-            )
-        with go_col2:
-            go_volume_exact = st.number_input(
-                "Exact Volume",
-                min_value=0,
-                help="Or enter exact volume in lots",
-                key="go_volume_exact"
-            )
-
-        # Other Products - with prefill
-        other_product_notes = st.text_area(
-            "Other Product Notes",
-            value=prefill.get('other_product_notes', ""),
-            placeholder="e.g., CBAM index interest",
-            help="Notes on other products e.g. UKETS, CBAM, US products"
-        )
-
-        st.markdown('<p class="sub-header">Access & Systems</p>', unsafe_allow_html=True)
-
-        # Access Info - with prefill
+        # Build a two-column layout of field -> date
         col1, col2 = st.columns(2)
+        items = list(ALL_FIELDS_LABELS.items())
+        mid = (len(items) + 1) // 2
 
-        with col1:
-            access_options = ["NCM", "GCM", "DMA", "API", "Sponsored Access", "Voice", "Other"]
-            access_index = None
-            if prefill.get('access_type') in access_options:
-                access_index = access_options.index(prefill['access_type'])
-            access_type = st.selectbox(
-                "Access Type",
-                options=access_options,
-                index=access_index,
-                placeholder="e.g. NCM",
-                help="Type of market access"
-            )
+        for i, (label, db_col) in enumerate(items):
+            raw_date = update_dates.get(db_col)
 
-        with col2:
-            etrm_options = [
-                "Allegro",
-                "Amphora",
-                "Aspect",
-                "Brady (Igloo, Powerdesk, Crisk...)",
-                "Comcore",
-                "Eka",
-                "Endure",
-                "Entrade",
-                "Entrader",
-                "Ignite",
-                "Inatech",
-                "Lancelot",
-                "Molecule",
-                "Openlink",
-                "PCI",
-                "PexaOS",
-                "Triplepoint",
-                "Vuepoint"
-            ]
-            etrm_index = None
-            if prefill.get('etrm') in etrm_options:
-                etrm_index = etrm_options.index(prefill['etrm'])
-            etrm = st.selectbox(
-                "ETRM",
-                options=etrm_options,
-                index=etrm_index,
-                placeholder="Select ETRM system",
-                help="Energy Trading Risk Management system"
-            )
+            if raw_date is None or (isinstance(raw_date, float) and pd.isna(raw_date)):
+                date_str = "-"
+            else:
+                try:
+                    date_str = pd.Timestamp(raw_date).strftime("%d %b %Y")
+                except Exception:
+                    date_str = str(raw_date)
+
+            target = col1 if i < mid else col2
+            with target:
+                st.markdown(f"**{label}:** {date_str}")
 
 
-        # Front End Info - with prefill
-        col1, col2 = st.columns(2)
+def render_notes_panel(row_idx: int):
+    """Render a two-box notes panel: read-only existing notes + empty new note."""
+    orig_row = st.session_state.original_df.iloc[row_idx]
+    company = orig_row["COMPANY"]
+    client_type = orig_row["CLIENT_TYPE"]
 
-        with col1:
-            front_end_options = ["TT", "Trayport", "Touchpoint", "Manual Entry", "CQG"]
-            front_end = st.multiselect(
-                "Front End",
-                options=front_end_options,
-                default=[f for f in prefill.get('front_end', []) if f in front_end_options],
-                help="Trading front-end systems (select multiple)"
-            )
+    existing_notes = orig_row.get("NOTES", "") or ""
 
-        with col2:
-            front_end_details = st.text_input(
-                "Front End Details",
-                value=prefill.get('front_end_details', ""),
-                placeholder="Additional details...",
-                help="Additional front-end details"
-            )
+    # If the user already typed a new note (stored in inline_edits), show it
+    pending_new = st.session_state.inline_edits.get(row_idx, {}).get("NOTES", "")
 
-        # Source - with prefill
-        source_options = ["Meeting", "Estimate", "Call"]
-        source_index = None
-        if prefill.get('source') in source_options:
-            source_index = source_options.index(prefill['source'])
-        source = st.selectbox(
-            "Source",
-            options=source_options,
-            index=source_index,
-            placeholder="e.g. Meeting",
-            help="Data source"
+    with st.container(border=True):
+        st.markdown(
+            f'<p class="sub-header">Notes: {company} ({client_type})</p>',
+            unsafe_allow_html=True,
         )
 
-        # Notes - with prefill
-        notes = st.text_area(
-            "Notes",
-            value=prefill.get('notes', ""),
-            placeholder="Additional context and notes",
-            help="Any additional information about the client"
-        )
+        col_existing, col_new = st.columns(2)
 
-        st.markdown("---")
-
-        # Check required fields to enable/disable submit
-        _company_valid = bool(
-            company
-            and company != "Select a company..."
-            and company != "-- Enter new company --"
-        )
-        _client_type_valid = client_type is not None
-        _ready = _company_valid and _client_type_valid
-
-        # Submit button — greyed out until required fields are filled
-        submitted = st.form_submit_button(
-            label="**Submit**", width="stretch", disabled=not _ready
-        )
-        if not _ready:
-            _missing = []
-            if not _company_valid:
-                _missing.append("**Company Name**")
-            if not _client_type_valid:
-                _missing.append("**Client Type**")
-            st.warning(
-                f"Please fill in {' and '.join(_missing)} before submitting."
+        with col_existing:
+            st.markdown("**Current Notes (read-only)**")
+            # Use a styled div instead of a disabled text_area so the text
+            # is selectable / copyable and rendered in a darker font.
+            _escaped = existing_notes.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            _html_notes = _escaped.replace("\n", "<br>") if _escaped else "<em>No notes yet.</em>"
+            st.markdown(
+                f'<div style="background:#f7f7f7; border:1px solid #ddd; border-radius:6px; '
+                f'padding:10px; height:200px; overflow-y:auto; color:#1a1a1a; '
+                f'font-size:0.9rem; line-height:1.5; user-select:text;">'
+                f'{_html_notes}</div>',
+                unsafe_allow_html=True,
             )
 
-        if submitted and _ready:
-                # Convert multi-select lists to comma-separated strings
-                front_end_str = ", ".join(front_end) if front_end else None
+        with col_new:
+            st.markdown("**New Note**")
+            st.text_area(
+                "New Note",
+                value=pending_new,
+                height=200,
+                placeholder="Type your new note here...",
+                key=f"notes_new_{row_idx}",
+                label_visibility="collapsed",
+            )
 
-                # Combine selected clearers with additional ones
-                all_clearers = list(clearers) if clearers else []
-                if additional_clearers:
-                    all_clearers.extend([c.strip() for c in additional_clearers.split(",") if c.strip()])
-                clearers_str = ", ".join(all_clearers) if all_clearers else None
 
-                # Combine selected brokers with additional ones
-                all_brokers = list(brokers) if brokers else []
-                if additional_brokers:
-                    all_brokers.extend([b.strip() for b in additional_brokers.split(",") if b.strip()])
-                brokers_str = ", ".join(all_brokers) if all_brokers else None
+# == Change detection ==========================================================
 
-                # Range to midpoint mapping
-                range_midpoints = {
-                    "<2.5k": 1250,      # midpoint of 0-2500
-                    "2.5-5k": 3750,     # midpoint of 2500-5000
-                    "5-10k": 7500,      # midpoint of 5000-10000
-                    "10-20k": 15000,    # midpoint of 10000-20000
-                    "20-50k": 35000,    # midpoint of 20000-50000
-                    "50k+": 50000,      # representative value for 50k+
-                    "20k+": 20000,      # legacy value for GO volume
-                }
+def _dicts_equal(a, b) -> bool:
+    """Compare two dicts treating None / empty dict as equal."""
+    a = a if isinstance(a, dict) else {}
+    b = b if isinstance(b, dict) else {}
+    return a == b
 
-                # Process EUA volume - exact value takes priority, otherwise use range midpoint
-                eua_volume = None
-                if eua_volume_exact is not None and eua_volume_exact > 0:
-                    eua_volume = eua_volume_exact
-                    if eua_volume_range is not None:
-                        st.info("Note: Using exact EUA volume value (range selection ignored)")
-                elif eua_volume_range is not None:
-                    eua_volume = range_midpoints.get(eua_volume_range)
 
-                # Process GO volume - exact value takes priority, otherwise use range midpoint
-                go_volume = None
-                if go_volume_exact is not None and go_volume_exact > 0:
-                    go_volume = go_volume_exact
-                    if go_volume_range is not None:
-                        st.info("Note: Using exact GO volume value (range selection ignored)")
-                elif go_volume_range is not None:
-                    go_volume = range_midpoints.get(go_volume_range)
+def detect_changes(
+    original: pd.DataFrame, edited: pd.DataFrame, panel_edits: dict,
+    inline_edits: dict,
+) -> list[dict]:
+    """
+    Compare every editable cell and panel field.
+    Returns a list of INSERT-ready dicts (one per changed row).
+    Unchanged fields are set to None (-> SQL NULL).
 
-                # Convert sensitivities with impact levels to JSON string for VARIANT column
-                # Store numeric values: {"Margin": 0.75, "Fees": 0.5}
-                sensitivities_numeric = {
-                    sens: IMPACT_LABEL_TO_VALUE.get(label, 0.0)
-                    for sens, label in sensitivities_with_impact.items()
-                }
-                sensitivities_json = json.dumps(sensitivities_numeric) if sensitivities_numeric else None
-                sensitivities = list(sensitivities_with_impact.keys())  # For has_changed comparison
+    Uses the DataFrame index (not positional iloc) so that filtering
+    via the search box doesn't break row identity.
+    """
+    changed_rows: list[dict] = []
 
-                # Convert barriers with impact levels to JSON string for VARIANT column
-                barriers_numeric = {
-                    blk: IMPACT_LABEL_TO_VALUE.get(label, 0.0)
-                    for blk, label in barriers_with_impact.items()
-                }
-                barriers_json = json.dumps(barriers_numeric) if barriers_numeric else None
-                barriers = list(barriers_with_impact.keys())  # For has_changed comparison
+    # Iterate over the indices present in the edited DataFrame.
+    # When a search filter is active, only the visible rows are compared.
+    # Panel edits for non-visible rows are also checked separately below.
+    checked_indices = set()
 
-                # Helper function to check if a value has changed from prefill
-                def has_changed(field_name, new_value, is_list=False):
-                    """Compare new value against prefill. Returns True if changed or no prefill exists."""
-                    if not prefill:
-                        # No prefill = new record, save everything
-                        return True
-                    prefill_value = prefill.get(field_name)
-                    if is_list:
-                        # Compare lists (order-independent)
-                        prefill_list = prefill_value if prefill_value else []
-                        new_list = new_value if new_value else []
-                        return set(prefill_list) != set(new_list)
-                    else:
-                        # Compare scalar values (treat empty string as None)
-                        if prefill_value == "" or prefill_value is None:
-                            prefill_value = None
-                        if new_value == "" or new_value is None:
-                            new_value = None
-                        return prefill_value != new_value
+    for idx in edited.index:
+        checked_indices.add(idx)
+        orig_row = original.loc[idx]
+        edit_row = edited.loc[idx]
+        row_changed = False
 
-                # Prepare data - only include changed fields (always include company and client_type)
-                data = {
-                    'client_status': (client_status if client_status else None) if has_changed('client_status', client_status) else None,
-                    'client_type': client_type,  # Always save
-                    'company': company,  # Always save
-                    'sensitivities': sensitivities_json if has_changed('sensitivities', sensitivities, is_list=True) else None,
-                    'barriers': barriers_json if has_changed('barriers', barriers, is_list=True) else None,
-                    'decision_makers': (decision_makers if decision_makers else None) if has_changed('decision_makers', decision_makers) else None,
-                    'overall_volume': None,
-                    'eua_volume': eua_volume if has_changed('eua_volume', eua_volume) else None,
-                    'go_volume': go_volume if has_changed('go_volume', go_volume) else None,
-                    'power_volume': None,
-                    'gas_volume': None,
-                    'other_product_notes': (other_product_notes if other_product_notes else None) if has_changed('other_product_notes', other_product_notes) else None,
-                    'access_type': (access_type if access_type else None) if has_changed('access_type', access_type) else None,
-                    'front_end': front_end_str if has_changed('front_end', front_end, is_list=True) else None,
-                    'front_end_details': (front_end_details if front_end_details else None) if has_changed('front_end_details', front_end_details) else None,
-                    'clearers': clearers_str if has_changed('clearers', all_clearers, is_list=True) else None,
-                    'brokers': brokers_str if has_changed('brokers', all_brokers, is_list=True) else None,
-                    'etrm': (etrm if etrm else None) if has_changed('etrm', etrm) else None,
-                    'source': (source if source else None) if has_changed('source', source) else None,
-                    'notes': (notes if notes else None) if has_changed('notes', notes) else None
-                }
+        row_data: dict = {
+            "company": edit_row["COMPANY"],
+            "client_type": edit_row["CLIENT_TYPE"],
+            "overall_volume": None,
+            "power_volume": None,
+            "gas_volume": None,
+        }
 
-                # Insert data
-                with st.spinner("Submitting data..."):
-                    success = insert_client_data(data)
+        # -- Inline columns -------------------------------------------------
+        for col in EDITABLE_COLUMNS:
+            orig_val = _normalise(orig_row[col])
+            edit_val = _normalise(edit_row[col])
 
-                if success:
-                    # Flag to reset company fields and show success on next rerun
-                    st.session_state.reset_company_fields = True
-                    st.session_state.show_success = True
-                    st.rerun()
+            if col in ("EUA_VOLUME", "GO_VOLUME"):
+                orig_num = None if orig_val is None else float(orig_val)
+                edit_num = None if edit_val is None else float(edit_val)
+                if orig_num != edit_num:
+                    row_changed = True
+                    row_data[col.lower()] = int(edit_num) if edit_num is not None else None
                 else:
-                    st.error("Failed to submit data. Please check your connection and try again.")
+                    row_data[col.lower()] = None
+            else:
+                if orig_val != edit_val:
+                    row_changed = True
+                    row_data[col.lower()] = edit_val
+                else:
+                    row_data[col.lower()] = None
 
-    # Refresh Data button (outside form)
-    st.markdown("")
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col2:
-        if st.button("🔄 Refresh Data", help="Refresh dropdown lists to see newly added entries", use_container_width=True):
-            get_all_data.clear()
+        # -- Panel-edited columns (Sensitivities & Blockers) ----------------
+        if idx in panel_edits:
+            pe = panel_edits[idx]
+
+            orig_sens = orig_row.get("_SENSITIVITIES_RAW", {}) or {}
+            new_sens = pe.get("sensitivities", {})
+            if not _dicts_equal(orig_sens, new_sens):
+                row_changed = True
+                row_data["sensitivities"] = json.dumps(new_sens) if new_sens else None
+            else:
+                row_data["sensitivities"] = None
+
+            orig_barriers = orig_row.get("_BARRIERS_RAW", {}) or {}
+            new_barriers = pe.get("barriers", {})
+            if not _dicts_equal(orig_barriers, new_barriers):
+                row_changed = True
+                row_data["barriers"] = json.dumps(new_barriers) if new_barriers else None
+            else:
+                row_data["barriers"] = None
+        else:
+            row_data["sensitivities"] = None
+            row_data["barriers"] = None
+
+        if row_changed:
+            changed_rows.append(row_data)
+
+    # Also check inline edits and panel edits for rows NOT currently visible.
+    offscreen_indices = set(inline_edits.keys()) | set(panel_edits.keys())
+    for idx in offscreen_indices:
+        if idx in checked_indices:
+            continue
+        orig_row = original.loc[idx]
+        row_data = {
+            "company": orig_row["COMPANY"],
+            "client_type": orig_row["CLIENT_TYPE"],
+            "overall_volume": None,
+            "power_volume": None,
+            "gas_volume": None,
+        }
+        row_changed = False
+
+        # -- Inline column edits for filtered-out rows ----------------------
+        ie = inline_edits.get(idx, {})
+        for col in EDITABLE_COLUMNS:
+            if col in ie:
+                orig_val = _normalise(orig_row[col])
+                edit_val = _normalise(ie[col])
+                if col in ("EUA_VOLUME", "GO_VOLUME"):
+                    orig_num = None if orig_val is None else float(orig_val)
+                    edit_num = None if edit_val is None else float(edit_val)
+                    if orig_num != edit_num:
+                        row_changed = True
+                        row_data[col.lower()] = int(edit_num) if edit_num is not None else None
+                    else:
+                        row_data[col.lower()] = None
+                else:
+                    if orig_val != edit_val:
+                        row_changed = True
+                        row_data[col.lower()] = edit_val
+                    else:
+                        row_data[col.lower()] = None
+            else:
+                row_data[col.lower()] = None
+
+        # -- Panel-edited columns (Sensitivities & Blockers) ----------------
+        pe = panel_edits.get(idx)
+        if pe:
+            orig_sens = orig_row.get("_SENSITIVITIES_RAW", {}) or {}
+            new_sens = pe.get("sensitivities", {})
+            if not _dicts_equal(orig_sens, new_sens):
+                row_changed = True
+                row_data["sensitivities"] = json.dumps(new_sens) if new_sens else None
+            else:
+                row_data["sensitivities"] = None
+
+            orig_barriers = orig_row.get("_BARRIERS_RAW", {}) or {}
+            new_barriers = pe.get("barriers", {})
+            if not _dicts_equal(orig_barriers, new_barriers):
+                row_changed = True
+                row_data["barriers"] = json.dumps(new_barriers) if new_barriers else None
+            else:
+                row_data["barriers"] = None
+        else:
+            row_data["sensitivities"] = None
+            row_data["barriers"] = None
+
+        if row_changed:
+            changed_rows.append(row_data)
+
+    return changed_rows
+
+
+def detect_kam_changes(
+    original: pd.DataFrame, edited: pd.DataFrame, inline_edits: dict,
+) -> list[dict]:
+    """
+    Detect KAM column edits (EEX_KAM, INCUBEX_KAM).
+    Returns a list of dicts ready for upsert_prospect_kam().
+    Only accepts changes where the ORIGINAL value was blank — prevents
+    users from overwriting KAMs that came from COMPANY_CODE.
+    Only accepts changes for Prospects and Setting Up — not Clients.
+    """
+    kam_rows: list[dict] = []
+    checked_indices = set()
+
+    for idx in edited.index:
+        checked_indices.add(idx)
+        orig_row = original.loc[idx]
+        edit_row = edited.loc[idx]
+
+        # Only allow KAM edits for Prospects and Setting Up — not Clients
+        status = (orig_row.get("CLIENT_STATUS") or "").strip()
+        if status not in ("Prospect", "Setting up"):
+            continue
+
+        eex_orig = _normalise(orig_row.get("EEX_KAM"))
+        eex_edit = _normalise(edit_row.get("EEX_KAM"))
+        inx_orig = _normalise(orig_row.get("INCUBEX_KAM"))
+        inx_edit = _normalise(edit_row.get("INCUBEX_KAM"))
+
+        # Only accept edits where original was blank
+        eex_new = eex_edit if (eex_orig is None and eex_edit is not None) else None
+        inx_new = inx_edit if (inx_orig is None and inx_edit is not None) else None
+
+        if eex_new is not None or inx_new is not None:
+            kam_rows.append({
+                "company": edit_row["COMPANY"],
+                "client_type": edit_row["CLIENT_TYPE"],
+                "eex_kam": eex_new,
+                "incubex_kam": inx_new,
+            })
+
+    # Check inline_edits for filtered-out rows
+    for idx, ie in inline_edits.items():
+        if idx in checked_indices:
+            continue
+        orig_row = original.loc[idx]
+        status = (orig_row.get("CLIENT_STATUS") or "").strip()
+        if status not in ("Prospect", "Setting up"):
+            continue
+        eex_kam = None
+        incubex_kam = None
+        if "EEX_KAM" in ie:
+            eex_orig = _normalise(orig_row.get("EEX_KAM"))
+            if eex_orig is None and _normalise(ie["EEX_KAM"]) is not None:
+                eex_kam = _normalise(ie["EEX_KAM"])
+        if "INCUBEX_KAM" in ie:
+            inx_orig = _normalise(orig_row.get("INCUBEX_KAM"))
+            if inx_orig is None and _normalise(ie["INCUBEX_KAM"]) is not None:
+                incubex_kam = _normalise(ie["INCUBEX_KAM"])
+        if eex_kam is not None or incubex_kam is not None:
+            kam_rows.append({
+                "company": orig_row["COMPANY"],
+                "client_type": orig_row["CLIENT_TYPE"],
+                "eex_kam": eex_kam,
+                "incubex_kam": incubex_kam,
+            })
+
+    return kam_rows
+
+
+# == Panel enforcement helper ==================================================
+
+def _resolve_checkbox(edited_df, col_name, prev_active_key):
+    """Resolve a checkbox column, ensuring only one row is active.
+
+    Returns the new active row index (or None).
+    """
+    if col_name not in edited_df.columns:
+        return st.session_state.get(prev_active_key)
+    ticked = edited_df.index[edited_df[col_name] == True].tolist()
+    prev = st.session_state[prev_active_key]
+
+    if ticked:
+        if prev is not None and prev in ticked:
+            others = [i for i in ticked if i != prev]
+            new_active = others[0] if others else prev
+        else:
+            new_active = ticked[0]
+        return new_active
+    else:
+        return None
+
+
+# == Confirmation dialog =======================================================
+
+@st.dialog("Confirm Submission", width="large")
+def confirm_submit_dialog():
+    """Modal popup showing a preview of changes before writing to Snowflake."""
+    changed = st.session_state.pending_changes or []
+    kam_changed = st.session_state.get("pending_kam_changes", []) or []
+    total = len(changed) + len(kam_changed)
+    st.markdown(f"**{total} row(s) changed** — review before submitting:")
+
+    skip_keys = {"company", "client_type", "overall_volume", "power_volume", "gas_volume"}
+    preview_rows = []
+    for r in changed:
+        for k, v in r.items():
+            if k in skip_keys or v is None:
+                continue
+            display_val = f"{v:,}" if isinstance(v, (int, float)) else str(v)
+            preview_rows.append({
+                "Company": r["company"],
+                "Client Type": r["client_type"],
+                "Field": k.replace("_", " ").title(),
+                "New Value": display_val,
+            })
+    # Add KAM changes to preview
+    for r in kam_changed:
+        if r.get("eex_kam") is not None:
+            preview_rows.append({
+                "Company": r["company"],
+                "Client Type": r["client_type"],
+                "Field": "EEX KAM",
+                "New Value": r["eex_kam"],
+            })
+        if r.get("incubex_kam") is not None:
+            preview_rows.append({
+                "Company": r["company"],
+                "Client Type": r["client_type"],
+                "Field": "Incubex KAM",
+                "New Value": r["incubex_kam"],
+            })
+    preview = pd.DataFrame(preview_rows)
+    st.dataframe(preview, use_container_width=True, hide_index=True)
+
+    btn_accept, btn_cancel = st.columns(2)
+    with btn_accept:
+        if st.button("Accept", type="primary", use_container_width=True):
+            all_errors = []
+            total_success = 0
+            with st.spinner("Submitting changes..."):
+                # Route CLIENTS changes
+                if changed:
+                    client_ok, client_errs = insert_changed_rows(changed)
+                    total_success += client_ok
+                    all_errors.extend(client_errs)
+                # Route KAM changes to PROSPECT_KAM
+                if kam_changed:
+                    kam_ok, kam_errs = upsert_prospect_kam(kam_changed)
+                    total_success += kam_ok
+                    all_errors.extend(kam_errs)
+            st.session_state.submit_result = {
+                "success": total_success, "errors": all_errors,
+            }
+            st.session_state.pending_changes = None
+            st.session_state.pending_kam_changes = None
+            if total_success > 0:
+                fetch_view_data.clear()
+                st.session_state.force_reload = True
+            st.rerun()
+    with btn_cancel:
+        if st.button("Continue Editing", use_container_width=True):
+            st.session_state.pending_changes = None
+            st.session_state.pending_kam_changes = None
             st.rerun()
 
-    # Display 5 most recent records
-    st.markdown("---")
-    st.markdown('<p class="sub-header">Recent Records</p>', unsafe_allow_html=True)
 
-    if not recent_df.empty:
-        st.dataframe(
-            recent_df,
-            use_container_width=True,
-            hide_index=True
-        )
+# == Load data =================================================================
+
+df = fetch_view_data()
+broker_list, clearer_list = fetch_firm_names()
+
+if df.empty:
+    st.warning("No data returned from STREAMLIT_APP_VIEW2.")
+    st.stop()
+
+# Extend dropdown lists with any values already in the data but missing from master list
+existing_brokers = df["BROKERS"].dropna().unique().tolist()
+existing_clearers = df["CLEARERS"].dropna().unique().tolist()
+broker_list = sorted(set(broker_list) | set(b for b in existing_brokers if b))
+clearer_list = sorted(set(clearer_list) | set(c for c in existing_clearers if c))
+
+# Initialise session state on first load or after explicit refresh.
+if "original_df" not in st.session_state or st.session_state.get("force_reload"):
+    st.session_state.original_df = df.copy(deep=True)
+    st.session_state.working_df = df.copy(deep=True)
+    st.session_state.active_edit_row = None
+    st.session_state.active_info_row = None
+    st.session_state.active_notes_row = None
+    st.session_state.panel_edits = {}  # {row_idx: {"sensitivities": {...}, "barriers": {...}}}
+    st.session_state.inline_edits = {}  # {row_idx: {col: value}} — survives filter changes
+    st.session_state.pending_changes = None
+    st.session_state.submit_result = None
+    st.session_state.force_reload = False
+
+# Ensure keys exist for sessions that started before these features were added.
+if "inline_edits" not in st.session_state:
+    st.session_state.inline_edits = {}
+if "active_notes_row" not in st.session_state:
+    st.session_state.active_notes_row = None
+
+
+# == Search ====================================================================
+
+search_col1, search_col2 = st.columns([1, 1])
+
+with search_col1:
+    _search_df = st.session_state.working_df
+    company_options = ["All"] + sorted(_search_df["COMPANY"].dropna().unique().tolist())
+    selected_company = st.selectbox(
+        "Search company",
+        options=company_options,
+        index=0,
+        key="company_search",
+    )
+
+with search_col2:
+    _search_df = st.session_state.working_df
+    _has_kam_cols = "EEX_KAM" in _search_df.columns and "INCUBEX_KAM" in _search_df.columns
+    if _has_kam_cols:
+        eex_kams = _search_df["EEX_KAM"].dropna().unique().tolist()
+        incubex_kams = _search_df["INCUBEX_KAM"].dropna().unique().tolist()
+        all_kams = sorted(set(eex_kams + incubex_kams))
     else:
-        st.info("No recent records found.")
+        all_kams = []
+    kam_options = ["All"] + all_kams
+    selected_kam = st.selectbox(
+        "Search KAM",
+        options=kam_options,
+        index=0,
+        key="kam_search",
+    )
 
 
-if __name__ == "__main__":
-    main()
+# == Column preset filter =====================================================
+
+selected_preset = st.segmented_control(
+    "Column Filters:",
+    options=list(COLUMN_PRESETS.keys()),
+    default="All",
+    key="column_preset",
+)
+
+# Clear panels if the selected preset hides their trigger columns
+preset_columns = COLUMN_PRESETS.get(selected_preset or "All")
+if preset_columns is not None and "EDIT" not in preset_columns:
+    if st.session_state.get("active_edit_row") is not None:
+        st.session_state.active_edit_row = None
+if preset_columns is not None and "NOTES_EDIT" not in preset_columns:
+    if st.session_state.get("active_notes_row") is not None:
+        st.session_state.active_notes_row = None
+
+
+# == Editor fragment ===========================================================
+# Wrapping the data editor and everything below it in st.fragment means that
+# cell edits, checkbox toggles, and panel interactions only rerun THIS section
+# — not the entire page.  This preserves the data-editor's sort order and
+# scroll position when the user edits a cell.
+
+@st.fragment
+def editor_fragment():
+
+    # -- Collect panel edits FIRST (before building display) -------------------
+    # Streamlit updates st.session_state widget values at the START of each
+    # rerun, so we can read the current panel state here, before the
+    # data_editor renders.  This fixes the "one step behind" display lag.
+
+    if st.session_state.active_edit_row is not None:
+        active = st.session_state.active_edit_row
+        # Only collect widget state if the panel was already rendered on a
+        # previous rerun (i.e. the widgets exist).
+        if st.session_state.get(f"_panel_rendered_{active}", False):
+            st.session_state.panel_edits[active] = collect_panel_edits(active)
+
+    # -- Collect notes panel edit ----------------------------------------------
+    if st.session_state.active_notes_row is not None:
+        _notes_idx = st.session_state.active_notes_row
+        _notes_key = f"notes_new_{_notes_idx}"
+        if _notes_key in st.session_state:
+            _new_note = (st.session_state[_notes_key] or "").strip()
+            if _new_note:
+                if _notes_idx not in st.session_state.inline_edits:
+                    st.session_state.inline_edits[_notes_idx] = {}
+                st.session_state.inline_edits[_notes_idx]["NOTES"] = _new_note
+            else:
+                # User cleared the new-note box — remove NOTES from inline_edits
+                if _notes_idx in st.session_state.inline_edits:
+                    st.session_state.inline_edits[_notes_idx].pop("NOTES", None)
+                    if not st.session_state.inline_edits[_notes_idx]:
+                        del st.session_state.inline_edits[_notes_idx]
+
+    # -- Apply live preview: update display strings from panel & inline edits --
+    working = st.session_state.working_df
+
+    for idx, pe in st.session_state.panel_edits.items():
+        if idx < len(working):
+            sens_labels = _panel_edit_to_labels(pe, "sensitivities")
+            block_labels = _panel_edit_to_labels(pe, "barriers")
+            working.at[idx, "SENSITIVITIES"] = _labels_to_display(sens_labels)
+            working.at[idx, "BARRIERS"] = _labels_to_display(block_labels)
+
+    for idx, col_edits in st.session_state.inline_edits.items():
+        if idx < len(working):
+            for col, val in col_edits.items():
+                working.at[idx, col] = val
+
+    # -- Build working_with_edit -----------------------------------------------
+    working_with_edit = working.copy()
+    working_with_edit.insert(0, "EDIT", False)
+    working_with_edit.insert(1, "INFO", False)
+    active_row = st.session_state.active_edit_row
+    if active_row is not None and active_row < len(working_with_edit):
+        working_with_edit.at[active_row, "EDIT"] = True
+    active_info = st.session_state.active_info_row
+    if active_info is not None and active_info < len(working_with_edit):
+        working_with_edit.at[active_info, "INFO"] = True
+
+    working_with_edit["NOTES_EDIT"] = False
+    active_notes = st.session_state.active_notes_row
+    if active_notes is not None and active_notes < len(working_with_edit):
+        working_with_edit.at[active_notes, "NOTES_EDIT"] = True
+
+    # -- Apply search filters (read values from session state) -----------------
+    sel_company = st.session_state.get("company_search", "All")
+    sel_kam = st.session_state.get("kam_search", "All")
+    has_kam_cols = (
+        "EEX_KAM" in working_with_edit.columns
+        and "INCUBEX_KAM" in working_with_edit.columns
+    )
+
+    display_df = working_with_edit
+    if sel_company != "All":
+        display_df = display_df[display_df["COMPANY"] == sel_company]
+    if sel_kam != "All" and has_kam_cols:
+        kam_mask = (
+            (display_df["EEX_KAM"] == sel_kam)
+            | (display_df["INCUBEX_KAM"] == sel_kam)
+        )
+        display_df = display_df[kam_mask]
+
+    # -- Column preset ---------------------------------------------------------
+    sel_preset = st.session_state.get("column_preset", "All")
+    cur_preset_columns = COLUMN_PRESETS.get(sel_preset or "All")
+
+    # -- Styled DataFrame ------------------------------------------------------
+    styled_df = display_df.style.map(
+        highlight_entry_date, subset=["ENTRY_DATE"]
+    )
+
+    # -- Column order ----------------------------------------------------------
+    _col_order_prefix = ["COMPANY", "CLIENT_TYPE", "CLIENT_STATUS"]
+    if has_kam_cols:
+        _col_order_prefix += ["EEX_KAM", "INCUBEX_KAM"]
+
+    _full_col_order = _col_order_prefix + [
+        "SENSITIVITIES", "BARRIERS", "EDIT",
+        "DECISION_MAKERS", "EUA_VOLUME", "GO_VOLUME",
+        "OTHER_PRODUCT_NOTES", "ACCESS_TYPE", "FRONT_END", "FRONT_END_DETAILS",
+        "CLEARERS", "BROKERS", "ETRM", "SOURCE", "NOTES", "NOTES_EDIT", "ENTRY_DATE",
+        "INFO",  # Always far right
+    ]
+
+    if cur_preset_columns is None:
+        _col_order = _full_col_order
+    else:
+        _col_order = [c for c in cur_preset_columns if c in _full_col_order]
+        if "INFO" not in _col_order:
+            _col_order.append("INFO")
+
+    # -- Data editor -----------------------------------------------------------
+    edited_df = st.data_editor(
+        styled_df,
+        column_config=get_column_config(
+            broker_options=broker_list, clearer_options=clearer_list
+        ),
+        column_order=_col_order,
+        use_container_width=True,
+        hide_index=True,
+        num_rows="fixed",
+        disabled=READ_ONLY_COLUMNS,
+        key="client_data_editor",
+    )
+
+    # -- Capture inline edits --------------------------------------------------
+    for _cap_idx in edited_df.index:
+        _cap_orig = st.session_state.original_df.loc[_cap_idx]
+        _cap_edit = edited_df.loc[_cap_idx]
+        _cap_row_edits = {}
+        for _cap_col in EDITABLE_COLUMNS + KAM_COLUMNS:
+            _cap_orig_val = _normalise(_cap_orig[_cap_col])
+            _cap_edit_val = _normalise(_cap_edit[_cap_col])
+            if _cap_col in ("EUA_VOLUME", "GO_VOLUME"):
+                _cap_orig_num = None if _cap_orig_val is None else float(_cap_orig_val)
+                _cap_edit_num = None if _cap_edit_val is None else float(_cap_edit_val)
+                if _cap_orig_num != _cap_edit_num:
+                    _cap_row_edits[_cap_col] = _cap_edit[_cap_col]
+            else:
+                if _cap_orig_val != _cap_edit_val:
+                    _cap_row_edits[_cap_col] = _cap_edit[_cap_col]
+        if _cap_row_edits:
+            st.session_state.inline_edits[_cap_idx] = _cap_row_edits
+        elif _cap_idx in st.session_state.inline_edits:
+            # User reverted all changes for this row — remove it
+            del st.session_state.inline_edits[_cap_idx]
+
+    # -- Panel enforcement (one panel at a time: Edit, Info, or Notes) ---------
+    new_edit = _resolve_checkbox(edited_df, "EDIT", "active_edit_row")
+    new_info = _resolve_checkbox(edited_df, "INFO", "active_info_row")
+    new_notes = _resolve_checkbox(edited_df, "NOTES_EDIT", "active_notes_row")
+
+    needs_rerun = False
+
+    # -- Edit column changed
+    if new_edit != st.session_state.active_edit_row:
+        old_edit = st.session_state.active_edit_row
+        if old_edit is not None:
+            st.session_state.pop(f"_panel_rendered_{old_edit}", None)
+        st.session_state.active_edit_row = new_edit
+        if new_edit is not None:
+            # Close other panels when edit panel opens
+            st.session_state.active_info_row = None
+            st.session_state.active_notes_row = None
+        needs_rerun = True
+
+    # -- Info column changed
+    if new_info != st.session_state.active_info_row:
+        st.session_state.active_info_row = new_info
+        if new_info is not None:
+            # Close other panels when info panel opens
+            st.session_state.active_edit_row = None
+            st.session_state.active_notes_row = None
+        needs_rerun = True
+
+    # -- Notes Edit column changed
+    if new_notes != st.session_state.active_notes_row:
+        st.session_state.active_notes_row = new_notes
+        if new_notes is not None:
+            # Close other panels when notes panel opens
+            st.session_state.active_edit_row = None
+            st.session_state.active_info_row = None
+        needs_rerun = True
+
+    if needs_rerun:
+        st.rerun(scope="fragment")
+
+    # -- Render the active panel (only one at a time) --------------------------
+    if st.session_state.active_edit_row is not None:
+        render_edit_panel(st.session_state.active_edit_row)
+        # Mark that widgets now exist so collect_panel_edits runs on the next rerun
+        st.session_state[f"_panel_rendered_{st.session_state.active_edit_row}"] = True
+    elif st.session_state.active_info_row is not None:
+        render_info_panel(st.session_state.active_info_row)
+    elif st.session_state.active_notes_row is not None:
+        render_notes_panel(st.session_state.active_notes_row)
+
+    # -- Buttons ---------------------------------------------------------------
+    col_left, col_mid, col_right = st.columns([1, 2, 1])
+
+    with col_mid:
+        submit_clicked = st.button(
+            "Submit Changes", type="primary", use_container_width=True
+        )
+
+    with col_right:
+        refresh_clicked = st.button("Refresh Data", use_container_width=True)
+
+    if refresh_clicked:
+        fetch_view_data.clear()
+        st.session_state.force_reload = True
+        st.rerun()  # Full app rerun to reload data
+
+    if submit_clicked:
+        changed = detect_changes(
+            st.session_state.original_df, edited_df,
+            st.session_state.panel_edits, st.session_state.inline_edits,
+        )
+        kam_changed = detect_kam_changes(
+            st.session_state.original_df, edited_df, st.session_state.inline_edits,
+        )
+        if not changed and not kam_changed:
+            st.info("No changes detected.")
+        else:
+            st.session_state.pending_changes = changed
+            st.session_state.pending_kam_changes = kam_changed
+            confirm_submit_dialog()
+
+    # Show result messages after a successful dialog submission
+    if st.session_state.get("submit_result"):
+        result = st.session_state.pop("submit_result")
+        if result["errors"]:
+            for err in result["errors"]:
+                st.error(err)
+        if result["success"] > 0:
+            st.success(f"Successfully submitted {result['success']} row(s).")
+            st.balloons()
+
+
+# Run the fragment
+editor_fragment()
