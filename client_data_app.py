@@ -764,16 +764,30 @@ def main():
 
         st.markdown("---")
 
-        # Submit button
-        submitted = st.form_submit_button(label="**Submit**", width="stretch")
+        # Check required fields to enable/disable submit
+        _company_valid = bool(
+            company
+            and company != "Select a company..."
+            and company != "-- Enter new company --"
+        )
+        _client_type_valid = client_type is not None
+        _ready = _company_valid and _client_type_valid
 
-        if submitted:
-            # Validation
-            if not client_type:
-                st.error("Client Type is required!")
-            elif not company or company == "Select a company..." or company == "-- Enter new company --":
-                st.error("Company name is required!")
-            else:
+        # Submit button — greyed out until required fields are filled
+        submitted = st.form_submit_button(
+            label="**Submit**", width="stretch", disabled=not _ready
+        )
+        if not _ready:
+            _missing = []
+            if not _company_valid:
+                _missing.append("**Company Name**")
+            if not _client_type_valid:
+                _missing.append("**Client Type**")
+            st.warning(
+                f"Please fill in {' and '.join(_missing)} before submitting."
+            )
+
+        if submitted and _ready:
                 # Convert multi-select lists to comma-separated strings
                 front_end_str = ", ".join(front_end) if front_end else None
 
