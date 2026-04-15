@@ -33,6 +33,25 @@ from db import fetch_view_data, fetch_firm_names, insert_changed_rows, upsert_pr
 
 st.set_page_config(page_title="Client Data - Tabular View", page_icon="📋", layout="wide")
 
+# == Password gate =============================================================
+
+def check_password():
+    """Show a password prompt and return True if the user has authenticated."""
+    if st.session_state.get("authenticated"):
+        return True
+    st.markdown("### Please enter the app password to continue")
+    pwd = st.text_input("Password", type="password", key="login_password")
+    if st.button("Login", type="primary"):
+        if pwd == st.secrets["app"]["password"]:
+            st.session_state.authenticated = True
+            st.rerun()
+        else:
+            st.error("Incorrect password. Please try again.")
+    return False
+
+if not check_password():
+    st.stop()
+
 st.markdown(
     """
     <style>
