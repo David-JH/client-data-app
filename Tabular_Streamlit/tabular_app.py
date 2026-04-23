@@ -561,7 +561,7 @@ def detect_kam_changes(
         edit_row = edited.loc[idx]
 
         # Only allow KAM edits for Prospects and Setting Up — not Clients
-        status = (orig_row.get("CLIENT_STATUS") or "").strip()
+        status = str(orig_row.get("CLIENT_STATUS") or "").strip()
         if status not in ("Prospect", "Setting up"):
             continue
 
@@ -587,7 +587,7 @@ def detect_kam_changes(
         if idx in checked_indices:
             continue
         orig_row = original.loc[idx]
-        status = (orig_row.get("CLIENT_STATUS") or "").strip()
+        status = str(orig_row.get("CLIENT_STATUS") or "").strip()
         if status not in ("Prospect", "Setting up"):
             continue
         eex_kam = None
