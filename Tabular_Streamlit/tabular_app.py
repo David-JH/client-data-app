@@ -349,7 +349,7 @@ def render_notes_panel(row_idx: int):
     company = orig_row["COMPANY"]
     client_type = orig_row["CLIENT_TYPE"]
 
-    existing_notes = orig_row.get("NOTES", "") or ""
+    existing_notes = _normalise(orig_row.get("NOTES")) or ""
 
     # If the user already typed a new note (stored in inline_edits), show it
     pending_new = st.session_state.inline_edits.get(row_idx, {}).get("NOTES", "")
