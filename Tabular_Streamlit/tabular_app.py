@@ -735,6 +735,10 @@ if "original_df" not in st.session_state or st.session_state.get("force_reload")
     st.session_state.pending_changes = None
     st.session_state.submit_result = None
     st.session_state.force_reload = False
+    # Editor-base cache — invalidate so fragment rebuilds after refresh/reload
+    st.session_state._editor_filter_sig = None
+    if "_editor_base_df" in st.session_state:
+        del st.session_state["_editor_base_df"]
 
 # Ensure keys exist for sessions that started before these features were added.
 if "inline_edits" not in st.session_state:
@@ -832,54 +836,92 @@ def editor_fragment():
                     if not st.session_state.inline_edits[_notes_idx]:
                         del st.session_state.inline_edits[_notes_idx]
 
-    # -- Apply live preview: update display strings from panel & inline edits --
-    working = st.session_state.working_df
+    # -- Build stable editor base -----------------------------------------------
+    # We only bake inline_edits into the df passed to st.data_editor when truly
+    # necessary (filter change, panel toggle, or first load).  On cell-edit reruns
+    # the base stays frozen so the data editor's internal delta state is preserved,
+    # preventing rapid consecutive edits from being lost.
 
-    for idx, pe in st.session_state.panel_edits.items():
-        if idx < len(working):
-            sens_labels = _panel_edit_to_labels(pe, "sensitivities")
-            block_labels = _panel_edit_to_labels(pe, "barriers")
-            working.at[idx, "SENSITIVITIES"] = _labels_to_display(sens_labels)
-            working.at[idx, "BARRIERS"] = _labels_to_display(block_labels)
+    _filter_sig = (
+        st.session_state.get("company_search", "All"),
+        st.session_state.get("kam_search", "All"),
+    )
+    _filter_changed = (st.session_state.get("_editor_filter_sig") != _filter_sig)
+    if _filter_changed:
+        st.session_state._editor_filter_sig = _filter_sig
 
-    for idx, col_edits in st.session_state.inline_edits.items():
-        if idx < len(working):
-            for col, val in col_edits.items():
-                working.at[idx, col] = val
-
-    # -- Build working_with_edit -----------------------------------------------
-    working_with_edit = working.copy()
-    working_with_edit.insert(0, "EDIT", False)
-    working_with_edit.insert(1, "INFO", False)
-    active_row = st.session_state.active_edit_row
-    if active_row is not None and active_row < len(working_with_edit):
-        working_with_edit.at[active_row, "EDIT"] = True
-    active_info = st.session_state.active_info_row
-    if active_info is not None and active_info < len(working_with_edit):
-        working_with_edit.at[active_info, "INFO"] = True
-
-    working_with_edit["NOTES_EDIT"] = False
-    active_notes = st.session_state.active_notes_row
-    if active_notes is not None and active_notes < len(working_with_edit):
-        working_with_edit.at[active_notes, "NOTES_EDIT"] = True
-
-    # -- Apply search filters (read values from session state) -----------------
-    sel_company = st.session_state.get("company_search", "All")
-    sel_kam = st.session_state.get("kam_search", "All")
-    has_kam_cols = (
-        "EEX_KAM" in working_with_edit.columns
-        and "INCUBEX_KAM" in working_with_edit.columns
+    _needs_rebuild = (
+        _filter_changed
+        or st.session_state.pop("_needs_base_rebuild", False)
+        or "_editor_base_df" not in st.session_state
     )
 
-    display_df = working_with_edit
-    if sel_company != "All":
-        display_df = display_df[display_df["COMPANY"] == sel_company]
-    if sel_kam != "All" and has_kam_cols:
-        kam_mask = (
-            (display_df["EEX_KAM"] == sel_kam)
-            | (display_df["INCUBEX_KAM"] == sel_kam)
-        )
-        display_df = display_df[kam_mask]
+    if _needs_rebuild:
+        # Start from clean original data — never mutate original_df or working_df
+        _base = st.session_state.original_df.copy()
+
+        # Apply panel_edits preview: SENSITIVITIES / BARRIERS are read-only so
+        # baking them in cannot affect the data editor's editable-cell state.
+        for _bidx, _bpe in st.session_state.panel_edits.items():
+            if _bidx < len(_base):
+                _base.at[_bidx, "SENSITIVITIES"] = _labels_to_display(
+                    _panel_edit_to_labels(_bpe, "sensitivities")
+                )
+                _base.at[_bidx, "BARRIERS"] = _labels_to_display(
+                    _panel_edit_to_labels(_bpe, "barriers")
+                )
+
+        # Apply inline_edits (editable column values)
+        for _bidx, _bcol_edits in st.session_state.inline_edits.items():
+            if _bidx < len(_base):
+                for _bcol, _bval in _bcol_edits.items():
+                    _base.at[_bidx, _bcol] = _bval
+
+        # Add virtual checkbox columns
+        _base.insert(0, "EDIT",      False)
+        _base.insert(1, "INFO",      False)
+        _base["NOTES_EDIT"] = False
+
+        # Reflect currently open panels in checkbox state
+        _ar = st.session_state.active_edit_row
+        if _ar is not None and _ar < len(_base):
+            _base.at[_ar, "EDIT"] = True
+        _ai = st.session_state.active_info_row
+        if _ai is not None and _ai < len(_base):
+            _base.at[_ai, "INFO"] = True
+        _an = st.session_state.active_notes_row
+        if _an is not None and _an < len(_base):
+            _base.at[_an, "NOTES_EDIT"] = True
+
+        # Apply search filters
+        _sel_company = st.session_state.get("company_search", "All")
+        _sel_kam     = st.session_state.get("kam_search", "All")
+        _has_kams = "EEX_KAM" in _base.columns and "INCUBEX_KAM" in _base.columns
+        if _sel_company != "All":
+            _base = _base[_base["COMPANY"] == _sel_company]
+        if _sel_kam != "All" and _has_kams:
+            _base = _base[
+                (_base["EEX_KAM"] == _sel_kam) | (_base["INCUBEX_KAM"] == _sel_kam)
+            ]
+
+        st.session_state._editor_base_df = _base
+
+    # Use a copy of the cached base — refresh S/B preview strings on every render
+    # (they are read-only, so updating them never resets data-editor delta state)
+    display_df = st.session_state._editor_base_df.copy()
+    if not _needs_rebuild:
+        for _bidx, _bpe in st.session_state.panel_edits.items():
+            if _bidx in display_df.index:
+                display_df.at[_bidx, "SENSITIVITIES"] = _labels_to_display(
+                    _panel_edit_to_labels(_bpe, "sensitivities")
+                )
+                display_df.at[_bidx, "BARRIERS"] = _labels_to_display(
+                    _panel_edit_to_labels(_bpe, "barriers")
+                )
+
+    has_kam_cols = (
+        "EEX_KAM" in display_df.columns and "INCUBEX_KAM" in display_df.columns
+    )
 
     # -- Column preset ---------------------------------------------------------
     sel_preset = st.session_state.get("column_preset", "All")
@@ -984,6 +1026,9 @@ def editor_fragment():
         needs_rerun = True
 
     if needs_rerun:
+        # Signal the next rerun to rebuild the editor base with updated checkbox
+        # states and any newly captured inline edits baked in.
+        st.session_state._needs_base_rebuild = True
         st.rerun(scope="fragment")
 
     # -- Render the active panel (only one at a time) --------------------------
