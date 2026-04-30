@@ -211,6 +211,8 @@ def highlight_entry_date(val):
         return "background-color: #FFB6C6"
 
 
+
+
 # == Panel rendering functions =================================================
 
 def render_edit_panel(row_idx: int):
@@ -708,6 +710,27 @@ def confirm_submit_dialog():
             st.rerun()
 
 
+@st.dialog("Unsaved Changes")
+def confirm_refresh_dialog():
+    """Warn the user that reloading will discard all pending edits."""
+    _n_rows = len(st.session_state.get("inline_edits", {})) + len(
+        st.session_state.get("panel_edits", {})
+    )
+    st.warning(
+        f"You have unsaved edits on **{_n_rows} row(s)** that have not been submitted. "
+        "Reloading will replace the table with the latest data — your changes may be lost."
+    )
+    _col_ok, _col_cancel = st.columns(2)
+    with _col_ok:
+        if st.button("Discard & Reload", type="primary", use_container_width=True):
+            fetch_view_data.clear()
+            st.session_state.force_reload = True
+            st.rerun()
+    with _col_cancel:
+        if st.button("Keep Editing", use_container_width=True):
+            st.rerun()  # just closes the dialog
+
+
 # == Load data =================================================================
 
 df = fetch_view_data()
@@ -877,7 +900,7 @@ def editor_fragment():
                 for _bcol, _bval in _bcol_edits.items():
                     _base.at[_bidx, _bcol] = _bval
 
-        # Add virtual checkbox columns
+        # Add virtual columns
         _base.insert(0, "EDIT",      False)
         _base.insert(1, "INFO",      False)
         _base["NOTES_EDIT"] = False
@@ -906,9 +929,11 @@ def editor_fragment():
 
         st.session_state._editor_base_df = _base
 
-    # Use a copy of the cached base — refresh S/B preview strings on every render
-    # (they are read-only, so updating them never resets data-editor delta state)
+    # Use a copy of the cached base — refresh read-only columns on every render
+    # (read-only column updates never reset the data-editor's editable-cell state)
     display_df = st.session_state._editor_base_df.copy()
+
+    # S/B preview strings (panel edit in progress)
     if not _needs_rebuild:
         for _bidx, _bpe in st.session_state.panel_edits.items():
             if _bidx in display_df.index:
@@ -928,9 +953,7 @@ def editor_fragment():
     cur_preset_columns = COLUMN_PRESETS.get(sel_preset or "All")
 
     # -- Styled DataFrame ------------------------------------------------------
-    styled_df = display_df.style.map(
-        highlight_entry_date, subset=["ENTRY_DATE"]
-    )
+    styled_df = display_df.style.map(highlight_entry_date, subset=["ENTRY_DATE"])
 
     # -- Column order ----------------------------------------------------------
     _col_order_prefix = ["COMPANY", "CLIENT_TYPE", "CLIENT_STATUS"]
@@ -942,7 +965,7 @@ def editor_fragment():
         "DECISION_MAKERS", "EUA_VOLUME", "GO_VOLUME",
         "OTHER_PRODUCT_NOTES", "ACCESS_TYPE", "FRONT_END", "FRONT_END_DETAILS",
         "CLEARERS", "BROKERS", "ETRM", "SOURCE", "NOTES", "NOTES_EDIT", "ENTRY_DATE",
-        "INFO",  # Always far right
+        "INFO",  # Meta column — always far right
     ]
 
     if cur_preset_columns is None:
@@ -953,11 +976,11 @@ def editor_fragment():
             _col_order.append("INFO")
 
     # -- Data editor -----------------------------------------------------------
+    _col_config = get_column_config(broker_options=broker_list, clearer_options=clearer_list)
+
     edited_df = st.data_editor(
         styled_df,
-        column_config=get_column_config(
-            broker_options=broker_list, clearer_options=clearer_list
-        ),
+        column_config=_col_config,
         column_order=_col_order,
         use_container_width=True,
         hide_index=True,
@@ -1053,9 +1076,15 @@ def editor_fragment():
         refresh_clicked = st.button("Refresh Data", use_container_width=True)
 
     if refresh_clicked:
-        fetch_view_data.clear()
-        st.session_state.force_reload = True
-        st.rerun()  # Full app rerun to reload data
+        _has_pending = bool(
+            st.session_state.get("inline_edits") or st.session_state.get("panel_edits")
+        )
+        if _has_pending:
+            confirm_refresh_dialog()
+        else:
+            fetch_view_data.clear()
+            st.session_state.force_reload = True
+            st.rerun()  # Full app rerun to reload data
 
     if submit_clicked:
         changed = detect_changes(
