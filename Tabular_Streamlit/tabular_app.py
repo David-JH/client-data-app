@@ -435,7 +435,13 @@ def detect_changes(
         # -- Inline columns -------------------------------------------------
         for col in EDITABLE_COLUMNS:
             orig_val = _normalise(orig_row[col])
-            edit_val = _normalise(edit_row[col])
+            # NOTES is edited via the notes panel text area, not the data
+            # editor cell (which always shows the original value).  Use the
+            # inline_edits value when the notes panel has set one.
+            if col == "NOTES" and idx in inline_edits and "NOTES" in inline_edits[idx]:
+                edit_val = _normalise(inline_edits[idx]["NOTES"])
+            else:
+                edit_val = _normalise(edit_row[col])
 
             if col in ("EUA_VOLUME", "GO_VOLUME"):
                 orig_num = None if orig_val is None else float(orig_val)
@@ -1005,11 +1011,22 @@ def editor_fragment():
             else:
                 if _cap_orig_val != _cap_edit_val:
                     _cap_row_edits[_cap_col] = _cap_edit[_cap_col]
+        # Preserve any note typed in the notes panel.  The data editor cell
+        # always shows the original NOTES value (the text area is separate),
+        # so the capture loop would otherwise overwrite or delete the note.
+        _notes_panel_val = st.session_state.inline_edits.get(_cap_idx, {}).get("NOTES")
+        if _notes_panel_val is not None and "NOTES" not in _cap_row_edits:
+            _cap_row_edits["NOTES"] = _notes_panel_val
+
         if _cap_row_edits:
             st.session_state.inline_edits[_cap_idx] = _cap_row_edits
         elif _cap_idx in st.session_state.inline_edits:
-            # User reverted all changes for this row — remove it
-            del st.session_state.inline_edits[_cap_idx]
+            # User reverted all data-editor changes for this row.
+            # Only delete the entry if there is no pending notes-panel edit.
+            if _notes_panel_val is not None:
+                st.session_state.inline_edits[_cap_idx] = {"NOTES": _notes_panel_val}
+            else:
+                del st.session_state.inline_edits[_cap_idx]
 
     # -- Panel enforcement (one panel at a time: Edit, Info, or Notes) ---------
     new_edit = _resolve_checkbox(edited_df, "EDIT", "active_edit_row")
