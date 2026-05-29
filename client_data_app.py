@@ -34,8 +34,10 @@ def check_password():
     if st.session_state.get("authenticated"):
         return True
     st.markdown("### Please enter the app password to continue")
-    pwd = st.text_input("Password", type="password", key="login_password")
-    if st.button("Login", type="primary"):
+    with st.form("login_form"):
+        pwd = st.text_input("Password", type="password")
+        submitted = st.form_submit_button("Login", type="primary")
+    if submitted:
         if pwd == st.secrets["app"]["password"]:
             st.session_state.authenticated = True
             st.rerun()
