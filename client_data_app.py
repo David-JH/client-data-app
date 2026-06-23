@@ -5,6 +5,7 @@ Database: INCUBEX_DATA_LAKE / CLIENTS / CLIENTS
 
 import streamlit as st
 import snowflake.connector
+from cryptography.hazmat.primitives import serialization
 from datetime import date, datetime
 import pandas as pd
 import json
