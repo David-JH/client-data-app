@@ -8,24 +8,49 @@ import time
 import pandas as pd
 import snowflake.connector
 import streamlit as st
+from cryptography.hazmat.primitives import serialization
 
 from config import VIEW_QUERY, VIEW_COLUMNS, INSERT_QUERY, VALUE_TO_QUALIFICATION
+
+
+def _load_private_key() -> bytes:
+    """Load the RSA private key from Streamlit secrets, return DER bytes for the
+    Snowflake connector.
+
+    Works for both encrypted and unencrypted PEM keys — the
+    ``private_key_passphrase`` secret is optional and only needed when the key
+    was generated with a passphrase (header reads ``ENCRYPTED PRIVATE KEY``).
+    """
+    pem = st.secrets["snowflake"]["private_key"]
+    passphrase = st.secrets["snowflake"].get("private_key_passphrase")
+    p_key = serialization.load_pem_private_key(
+        pem.encode("utf-8"),
+        password=passphrase.encode("utf-8") if passphrase else None,
+    )
+    return p_key.private_bytes(
+        encoding=serialization.Encoding.DER,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),  # decrypted in memory only
+    )
 
 
 def get_snowflake_connection(schema="CLIENTS", max_retries=3):
     """
     Create Snowflake connection using Streamlit secrets with retry logic.
+
+    Authenticates with an RSA key-pair (private key in secrets) rather than a
+    password.
     """
     last_error = None
     for attempt in range(max_retries):
         try:
             conn = snowflake.connector.connect(
                 user=st.secrets["snowflake"]["user"],
-                password=st.secrets["snowflake"]["password"],
                 account=st.secrets["snowflake"]["account"],
                 warehouse=st.secrets["snowflake"]["warehouse"],
                 database="INCUBEX_DATA_LAKE",
                 schema=schema,
+                private_key=_load_private_key(),
             )
             return conn
         except Exception as e:
