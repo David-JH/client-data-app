@@ -109,10 +109,35 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
+
+def _load_private_key() -> bytes:
+    """Load the RSA private key from Streamlit secrets, return DER bytes for the
+    Snowflake connector.
+
+    Works for both encrypted and unencrypted PEM keys — the
+    ``private_key_passphrase`` secret is optional and only needed when the key
+    was generated with a passphrase (header reads ``ENCRYPTED PRIVATE KEY``).
+    """
+    pem = st.secrets["snowflake"]["private_key"]
+    passphrase = st.secrets["snowflake"].get("private_key_passphrase")
+    p_key = serialization.load_pem_private_key(
+        pem.encode("utf-8"),
+        password=passphrase.encode("utf-8") if passphrase else None,
+    )
+    return p_key.private_bytes(
+        encoding=serialization.Encoding.DER,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),  # decrypted in memory only
+    )
+
+
 def get_snowflake_connection(schema="CLIENTS", max_retries=3):
     """
     Create Snowflake connection using Streamlit secrets with retry logic.
     For Streamlit Cloud deployment, secrets are stored in .streamlit/secrets.toml
+
+    Authenticates with an RSA key-pair (private key in secrets) rather than a
+    password.
     """
     import time
 
@@ -121,11 +146,11 @@ def get_snowflake_connection(schema="CLIENTS", max_retries=3):
         try:
             conn = snowflake.connector.connect(
                 user=st.secrets["snowflake"]["user"],
-                password=st.secrets["snowflake"]["password"],
                 account=st.secrets["snowflake"]["account"],
                 warehouse=st.secrets["snowflake"]["warehouse"],
                 database="INCUBEX_DATA_LAKE",
-                schema=schema
+                schema=schema,
+                private_key=_load_private_key(),
             )
             return conn
         except Exception as e:
@@ -135,6 +160,8 @@ def get_snowflake_connection(schema="CLIENTS", max_retries=3):
 
     st.error(f"Connection error after {max_retries} attempts: {str(last_error)}")
     return None
+
+
 
 
 @st.cache_data(ttl=300)  # Cache for 5 minutes
